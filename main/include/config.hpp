@@ -187,6 +187,11 @@ namespace espConfig
     std::array<uint8_t, 7> ethSpiConfig = {ETH_SPI_CONF_SPI_FREQ_MHZ, ETH_SPI_CONF_PIN_CS, ETH_SPI_CONF_PIN_IRQ, ETH_SPI_CONF_PIN_RST, ETH_SPI_CONF_PIN_SCK, ETH_SPI_CONF_PIN_MISO, ETH_SPI_CONF_PIN_MOSI};
     bool overrideStrappingRestriction = false;
     std::string accessPointPassword = AP_PASSWORD;
+    // Yale/August lock driven directly over BLE (see YaleBleLock).
+    bool yaleBleEnabled = false;
+    std::string yaleBleMac = "";
+    uint8_t yaleBleSlot = 0;
+    std::string yaleBleOfflineKey = "";  // secret: masked in the web API, never logged
   };
   struct actions_config_t {
     enum colorMap

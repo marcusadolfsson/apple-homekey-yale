@@ -45,11 +45,12 @@
 
 	const isCaptivePortal = $derived(route.pathname.startsWith('/captive-portal'));
 
-	// Reader type 2 (ST25R3916) is I2C: it uses only the first two pin slots,
+	// Reader types 2 (ST25R3916) and 3 (PN532 I2C) are I2C: it uses only the first two pin slots,
 	// as SDA and SCL. Showing them as SS/SCK/MISO/MOSI is not just cosmetic --
 	// it invites setting MISO/MOSI to real GPIOs that the firmware will never
 	// claim, and makes a correct I2C config look wrong.
-	const isI2cReader = $derived(nfcReaderType === 2);
+	const isI2cReader = $derived(nfcReaderType === 2 || nfcReaderType === 3);
+	const isRelayReader = $derived(nfcReaderType === 4);
 	const pinLabels = $derived(
 		isI2cReader
 			? ['SDA Pin', 'SCL Pin', '', '']
@@ -123,6 +124,8 @@
 				<option value={0}>PN532</option>
 				<option value={1}>PN7161</option>
 				<option value={2}>ST25R3916 (I2C)</option>
+				<option value={3}>PN532 (I2C)</option>
+				<option value={4}>Relay (ESP-NOW doorbell)</option>
 			</select>
 		</div>
 		<div class="form-control mb-2">

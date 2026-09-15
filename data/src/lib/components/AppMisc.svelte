@@ -426,6 +426,36 @@
 										class="toggle toggle-primary toggle-sm"
 									/>
 								</div>
+								<div class="flex items-center justify-between py-2 px-3 bg-base-100 rounded-lg">
+									<div>
+										<p class="text-sm font-medium">Yale BLE Lock</p>
+										<p class="text-xs text-base-content/60">Unlock a Yale/August lock directly over Bluetooth on a HomeKey tap (reboot to apply)</p>
+									</div>
+									<input
+										type="checkbox"
+										bind:checked={miscConfig.yaleBleEnabled}
+										class="toggle toggle-primary toggle-sm"
+									/>
+								</div>
+								{#if miscConfig.yaleBleEnabled}
+									<div class="grid grid-cols-1 gap-2 px-3">
+										<label class="form-control">
+											<span class="label-text text-xs">Lock MAC address</span>
+											<input type="text" bind:value={miscConfig.yaleBleMac} placeholder="AA:BB:CC:DD:EE:FF"
+												class="input input-sm input-bordered w-full font-mono" autocomplete="off" />
+										</label>
+										<label class="form-control">
+											<span class="label-text text-xs">Key slot</span>
+											<input type="number" min="0" max="255" bind:value={miscConfig.yaleBleSlot}
+												class="input input-sm input-bordered w-full" />
+										</label>
+										<label class="form-control">
+											<span class="label-text text-xs">Offline key (32 hex characters; hidden once saved)</span>
+											<input type="password" bind:value={miscConfig.yaleBleOfflineKey} placeholder="••••••••"
+												class="input input-sm input-bordered w-full font-mono" autocomplete="off" />
+										</label>
+									</div>
+								{/if}
 							</div>
               <!-- HomeKey Color -->
               <div class="form-control">

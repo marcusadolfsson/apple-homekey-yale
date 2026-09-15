@@ -113,7 +113,11 @@ ConfigManager::ConfigManager() : m_isInitialized(false) {
       {"ethRmiiConfig", &m_miscConfig.ethRmiiConfig},
       {"ethSpiConfig", &m_miscConfig.ethSpiConfig},
       {"overrideStrappingRestriction", &m_miscConfig.overrideStrappingRestriction},
-      {"accessPointPassword", &m_miscConfig.accessPointPassword}
+      {"accessPointPassword", &m_miscConfig.accessPointPassword},
+      {"yaleBleEnabled", &m_miscConfig.yaleBleEnabled},
+      {"yaleBleMac", &m_miscConfig.yaleBleMac},
+      {"yaleBleSlot", &m_miscConfig.yaleBleSlot},
+      {"yaleBleOfflineKey", &m_miscConfig.yaleBleOfflineKey}
     }
     },
     {
@@ -868,7 +872,7 @@ std::string ConfigManager::serializeToJson() {
                 using PointeeType = std::remove_pointer_t<T>;
 
                 if constexpr (std::is_same_v<PointeeType, std::string>) {
-                    if(key.contains("Password") || key.contains("Passwd")){
+                    if(key.contains("Password") || key.contains("Passwd") || key == "yaleBleOfflineKey"){
                         cJSON_AddStringToObject(root.get(), key.c_str(), "********");
                     } else {
                         cJSON_AddStringToObject(root.get(), key.c_str(), arg->c_str());

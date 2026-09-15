@@ -12,4 +12,6 @@ managed_components/
 gha-creds-*.json
 docs/public
 .direnv/
-build-*/
+build-*/relay-doorbell/build/
+relay-doorbell/sdkconfig
+relay-doorbell/managed_components/

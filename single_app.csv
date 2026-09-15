@@ -1,0 +1,6 @@
+# Name, Type, SubType, Offset, Size, Flags
+# Same NVS offset/size as with_ota.csv so HomeKit pairing and config survive.
+# OTA is dropped to fit the BLE stack: one 3.75 MB app instead of two 1.875 MB slots.
+nvs,data,nvs,,0x10000,,
+factory,app,factory,0x20000,0x3C0000,,
+spiffs,data,spiffs,,0x20000,,

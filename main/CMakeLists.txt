@@ -1,10 +1,10 @@
 idf_component_register(SRCS "main.cpp" "app_events.cpp" "app_event_loop.cpp" "ConfigManager.cpp" "ReaderDataManager.cpp"
                     "HardwareManager.cpp" "HomeKitLock.cpp" "LockManager.cpp"
-                    "MqttManager.cpp" "HKServices.cpp" "NfcManager.cpp" "Pn532Reader.cpp" "Pn7160Reader.cpp" "St25r3916Reader.cpp" "WebServerManager.cpp" "WebSocketLogSinker.cpp"
+                    "MqttManager.cpp" "HKServices.cpp" "NfcManager.cpp" "Pn532Reader.cpp" "Pn532I2cTransport.cpp" "YaleBleLock.cpp" "RemoteNfcReader.cpp" "RelayProtocol.cpp" "Pn7160Reader.cpp" "St25r3916Reader.cpp" "WebServerManager.cpp" "WebSocketLogSinker.cpp"
                     "ConsoleLogSinker.cpp" "GPIOAllocator.cpp" "EthernetDriver.cpp"
                     INCLUDE_DIRS "include"
                     PRIV_REQUIRES HomeSpan pn532_hal pn7160 DigitalDoorKey esp_https_server mqtt libsodium
-                    msgpack-c json loggable loggable_espidf esp_wifi dns_server)
+                    msgpack-c json loggable loggable_espidf esp_wifi dns_server bt mbedtls)
 
 include(FetchContent)
 

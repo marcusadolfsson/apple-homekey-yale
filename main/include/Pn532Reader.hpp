@@ -3,6 +3,7 @@
 #include "NfcReader.hpp"
 #include "pn532_cxx/pn532.hpp"
 #include "pn532_hal/spi.hpp"
+#include "Pn532I2cTransport.hpp"
 #include "soc/gpio_num.h"
 
 #include <array>
@@ -10,14 +11,19 @@
 #include <vector>
 
 /**
- * @brief PN532 SPI implementation of the INfcReader interface.
+ * @brief PN532 implementation of the INfcReader interface, over SPI or I2C.
  *
- * Wraps pn532::SpiTransport and pn532::Frontend, preserving the existing
+ * Wraps a pn532::Transport (SPI or I2C) and pn532::Frontend, preserving the existing
  * command/response polling model.
  */
 class Pn532Reader : public INfcReader {
 public:
-    Pn532Reader(const std::array<uint8_t, 4>& gpioPins, const std::array<uint8_t, 18>& ecpData);
+    enum class Bus { Spi, I2c };
+
+    /**
+     * @param gpioPins SPI: SS, SCK, MISO, MOSI. I2C: SDA, SCL (entries 2-3 unused).
+     */
+    Pn532Reader(const std::array<uint8_t, 4>& gpioPins, const std::array<uint8_t, 18>& ecpData, Bus bus = Bus::Spi);
     ~Pn532Reader() override;
 		Pn532Reader(const Pn532Reader&) = delete;
 		Pn532Reader& operator=(const Pn532Reader&) = delete;
@@ -49,7 +55,8 @@ public:
 private:
     const std::array<uint8_t, 18> &m_ecpData;
     std::array<uint8_t, 4> m_gpioPins;
-    pn532::SpiTransport* m_transport = nullptr;
+    Bus m_bus;
+    pn532::Transport* m_transport = nullptr;
     pn532::Frontend* m_frontend = nullptr;
 
     bool m_connected = false;

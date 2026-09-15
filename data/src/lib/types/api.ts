@@ -93,7 +93,7 @@ export interface CaptivePortalConfig {
   nfcPinsPreset: number;
   /** NFC GPIO pin configuration [SS, SCK, MISO, MOSI] */
   nfcGpioPins: [number, number, number, number];
-  /** NFC reader type (0 = PN532, 1 = PN7160, 2 = ST25R3916) */
+  /** NFC reader type (0 = PN532, 1 = PN7160, 2 = ST25R3916, 3 = PN532 I2C) */
   nfcReaderType: number;
   /** PN7160 IRQ pin */
   nfcIrqPin: number;
@@ -141,6 +141,14 @@ export interface MiscConfig {
   setupCode: string;
   /** Force lock to always unlock (overrides normal behavior) */
   lockAlwaysUnlock: boolean;
+  /** Drive a Yale/August lock directly over BLE */
+  yaleBleEnabled?: boolean;
+  /** Yale lock BLE MAC address (AA:BB:CC:DD:EE:FF) */
+  yaleBleMac?: string;
+  /** Yale offline key slot (key index) */
+  yaleBleSlot?: number;
+  /** Yale offline key, 32 hex chars. Write-only: the API returns ******** */
+  yaleBleOfflineKey?: string;
   /** Force lock to always lock (overrides normal behavior) */
   lockAlwaysLock: boolean;
   /** Enable HomeKey auth precompute cache (faster taps, higher CPU/RAM) */
@@ -163,7 +171,7 @@ export interface MiscConfig {
   nfcPinsPreset: number;
   /** NFC GPIO pin configuration [pin1, pin2, pin3, pin4] */
   nfcGpioPins: [number, number, number, number];
-  /** NFC reader type (0 = PN532, 1 = PN7160, 2 = ST25R3916) */
+  /** NFC reader type (0 = PN532, 1 = PN7160, 2 = ST25R3916, 3 = PN532 I2C) */
   nfcReaderType: number;
   /** PN7160 IRQ pin */
   nfcIrqPin: number;

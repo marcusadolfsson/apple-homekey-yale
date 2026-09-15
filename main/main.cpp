@@ -13,6 +13,7 @@
 #include "HardwareManager.hpp"
 #include "MqttManager.hpp"
 #include "WebServerManager.hpp"
+#include "YaleBleLock.hpp"
 #include <functional>
 #include <sodium/crypto_sign.h>
 #include <sodium/crypto_box.h>
@@ -31,6 +32,7 @@ std::unique_ptr<MqttManager> mqttManager;
 WebServerManager webServerManager(configManager, readerDataManager);
 std::unique_ptr<HomeKitLock> homekitLock;
 std::unique_ptr<NfcManager> nfcManager;
+std::unique_ptr<YaleBleLock> yaleBleLock;
 
 static dns_server_handle_t dns_server = NULL;
 
@@ -186,11 +188,13 @@ void setup() {
   const char *readerName = miscConfig.nfcReaderType == 0   ? "PN532 (SPI)"
                            : miscConfig.nfcReaderType == 1 ? "PN7160"
                            : miscConfig.nfcReaderType == 2 ? "ST25R3916 (I2C)"
+                           : miscConfig.nfcReaderType == 3 ? "PN532 (I2C)"
+                           : miscConfig.nfcReaderType == 4 ? "Relay (ESP-NOW doorbell)"
                                                            : "UNKNOWN";
   ESP_LOGI(TAG, "NFC reader type: %s (%u)", readerName, miscConfig.nfcReaderType);
   if (miscConfig.nfcReaderType == 1) {
     ESP_LOGI(TAG, "NFC IRQ pin: %d, VEN pin: %d", miscConfig.nfcIrqPin, miscConfig.nfcVenPin);
-  } else if (miscConfig.nfcReaderType == 2) {
+  } else if (miscConfig.nfcReaderType == 2 || miscConfig.nfcReaderType == 3) {
     ESP_LOGI(TAG, "NFC I2C pins: SDA=%d, SCL=%d", activeNfcPins[0], activeNfcPins[1]);
   }
   readerDataManager.begin();
@@ -209,6 +213,8 @@ void setup() {
   hardwareManager->begin();
   homekitLock->begin();
   lockManager->begin();
+  yaleBleLock = std::make_unique<YaleBleLock>(miscConfig);
+  yaleBleLock->begin();
   pollHS = true;
 }
 /**

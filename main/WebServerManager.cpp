@@ -1688,7 +1688,7 @@ esp_err_t WebServerManager::handleSaveCaptivePortalConfig(httpd_req_t *req) {
   }
 
   cJSON *nfcReaderTypeItem = cJSON_GetObjectItem(obj.get(), "nfcReaderType");
-  if (nfcReaderTypeItem && cJSON_IsNumber(nfcReaderTypeItem) && (nfcReaderTypeItem->valueint < 0 || nfcReaderTypeItem->valueint > 2)) {
+  if (nfcReaderTypeItem && cJSON_IsNumber(nfcReaderTypeItem) && (nfcReaderTypeItem->valueint < 0 || nfcReaderTypeItem->valueint > 4)) {
     httpd_resp_set_status(req, "400 Bad Request");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"Invalid nfcReaderType\"}");
