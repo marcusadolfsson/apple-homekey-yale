@@ -114,6 +114,14 @@ Hard-won details:
 
 **Behaviour: unlock only, fire and forget.** The reader does not track lock state;
 HA and the lock's own HomeKit module do that. A mortise nexTouch relocks itself.
+The unlock command returns on the lock's **ack (`0xAA`, tens of ms)**, not its
+**result (`0xBB`, ~1.8 s later when the motor stops)**: nothing depends on the
+result, and waiting for it held the shared radio — and so every tap — for the
+whole mechanical cycle. The result arrives during the 5 s linger and is logged
+(`lock reports unlock done`). After our own disconnect the lock is slow to
+advertise again; that is handled with a longer direct-connect timeout
+(`CONNECT_MS`), never a scan — a direct connect waits for the advertisement
+exactly as a scan would.
 
 ## Relay protocol (`main/RelayProtocol.hpp`)
 
@@ -269,6 +277,9 @@ which is *not encrypted* — enable flash encryption before deploying.
    three direct connects fail in a row (`DIRECT_FAILURES_BEFORE_SCAN`) — a failed
    direct connect with a known address means "out of range", and scanning only
    held the radio to learn the same thing. Out of range the window is now ~4 s.
+   In range it is connect + handshake + the lock's ack, ~0.7–1.2 s cold and
+   ~0.1 s on a lingering session; the ~1.8 s the motor takes is no longer held
+   (the unlock returns on the ack, see the Yale section).
    The base *drops* announcements that arrive meanwhile instead of queueing them,
    and a queued announcement older than 1.5 s is discarded. The 5 s linger after
    a command does **not** hold the radio (`BusyGuard` clears it on return), so a

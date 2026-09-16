@@ -567,15 +567,22 @@ void YaleBleLock::performCommand(Cmd cmd) {
     case Cmd::Lock: {
       const bool unlock = cmd == Cmd::Unlock;
       const uint8_t op = unlock ? OP_UNLOCK : OP_LOCK;
-      if (sendCommand(op, 0x00, 0xBB, op, -1, OP_RESULT_MS, resp)) {
-        const uint8_t result = resp[0x0F];
-        if (result == 0x00) {
-          ESP_LOGI(TAG, "%s succeeded in %lld ms", cmdName(cmd), (esp_timer_get_time() - t0) / 1000);
+      // Return on the lock's ack (0xAA, tens of ms), not its result (0xBB,
+      // ~1.8 s later when the motor stops). Nothing here depends on the
+      // result - state is not tracked - but waiting for it held the shared
+      // radio, and with it every tap, for the whole mechanical cycle. The
+      // result still arrives during the linger and handleCommandFrame() logs
+      // it. expectFlag 0: take the result if it somehow comes first.
+      if (sendCommand(op, 0x00, 0, op, -1, GATT_MS, resp)) {
+        if (resp[0] == 0xBB) {
+          const uint8_t result = resp[0x0F];
+          if (result == 0x00) ESP_LOGI(TAG, "%s succeeded in %lld ms", cmdName(cmd), (esp_timer_get_time() - t0) / 1000);
+          else ESP_LOGE(TAG, "%s failed: lock reported error 0x%02X", cmdName(cmd), result);
         } else {
-          ESP_LOGE(TAG, "%s failed: lock reported error 0x%02X", cmdName(cmd), result);
+          ESP_LOGI(TAG, "%s accepted by the lock in %lld ms", cmdName(cmd), (esp_timer_get_time() - t0) / 1000);
         }
       } else {
-        ESP_LOGE(TAG, "%s: no result from lock", cmdName(cmd));
+        ESP_LOGE(TAG, "%s: lock did not acknowledge the command", cmdName(cmd));
       }
       break;
     }
@@ -588,12 +595,14 @@ bool YaleBleLock::ensureConnected() {
   const int64_t t0 = esp_timer_get_time();
   const bool justDisconnected =
       m_lastDisconnectUs != 0 && esp_timer_get_time() - m_lastDisconnectUs < 10000000;
-  if (justDisconnected) ESP_LOGI(TAG, "recent session: scanning instead of a direct connect");
-  const bool tryDirect = m_addrKnown && !justDisconnected;
-  bool connected = tryDirect && connectDirect();
+  // Right after we drop a session the lock takes a moment to advertise again.
+  // A direct connect waits for that advertisement exactly as a scan would, so
+  // there is no reason to scan here: just allow it more time.
+  const bool tryDirect = m_addrKnown;
+  bool connected = tryDirect && connectDirect(justDisconnected ? CONNECT_MS : DIRECT_CONNECT_MS);
   if (!connected) {
     if (tryDirect) ++m_directFailures;
-    const bool scanWorthIt = !m_addrKnown || justDisconnected ||
+    const bool scanWorthIt = !m_addrKnown ||
                              m_directFailures >= DIRECT_FAILURES_BEFORE_SCAN;
     if (!scanWorthIt) {
       ESP_LOGW(TAG, "direct connect failed (%d in a row); not scanning - lock is most likely out of range",
@@ -633,17 +642,17 @@ bool YaleBleLock::ensureConnected() {
   return true;
 }
 
-bool YaleBleLock::connectDirect() {
+bool YaleBleLock::connectDirect(uint32_t timeoutMs) {
   const int64_t t0 = esp_timer_get_time();
   ble_addr_t peer{};
   peer.type = m_peerAddrType;
   for (int i = 0; i < 6; ++i) peer.val[i] = m_mac[5 - i];
   const ble_gap_conn_params cp = connParams();
-  int rc = ble_gap_connect(m_ownAddrType, &peer, DIRECT_CONNECT_MS, &cp, gapEvent, this);
+  int rc = ble_gap_connect(m_ownAddrType, &peer, int32_t(timeoutMs), &cp, gapEvent, this);
   Ev ev{};
-  if (rc != 0 || !waitFor(EvType::Connected, DIRECT_CONNECT_MS + 500, ev)) {
+  if (rc != 0 || !waitFor(EvType::Connected, timeoutMs + 500, ev)) {
     if (rc == 0) ble_gap_conn_cancel();
-    ESP_LOGW(TAG, "direct connect failed (rc=%d); falling back to scan", rc);
+    ESP_LOGW(TAG, "direct connect failed (rc=%d) after %u ms", rc, unsigned(timeoutMs));
     return false;
   }
   ESP_LOGI(TAG, "connected directly in %lld ms", (esp_timer_get_time() - t0) / 1000);
@@ -860,7 +869,8 @@ bool YaleBleLock::sendCommand(uint8_t opcode, uint8_t subtype, uint8_t expectFla
       continue;
     }
     handleCommandFrame(f);
-    if (f[0] == expectFlag && f[1] == expectOpcode && (expectSubtype < 0 || f[4] == expectSubtype)) {
+    const bool flagOk = expectFlag == 0 ? (f[0] == 0xAA || f[0] == 0xBB) : f[0] == expectFlag;
+    if (flagOk && f[1] == expectOpcode && (expectSubtype < 0 || f[4] == expectSubtype)) {
       response = f;
       return true;
     }
@@ -871,6 +881,9 @@ void YaleBleLock::handleCommandFrame(const Frame &f) {
   // State is not tracked (see class comment); frames are only logged.
   if (f[0] == 0xBB && f[1] == OP_GETSTATUS && (f[4] == STATUS_LOCK_ONLY || f[4] == STATUS_DOOR_AND_LOCK)) {
     ESP_LOGI(TAG, "lock status 0x%02X", f[8]);
+  } else if (f[0] == 0xBB && (f[1] == OP_UNLOCK || f[1] == OP_LOCK)) {
+    if (f[0x0F] == 0x00) ESP_LOGI(TAG, "lock reports %s done", f[1] == OP_UNLOCK ? "unlock" : "lock");
+    else ESP_LOGE(TAG, "lock reports %s failed: error 0x%02X", f[1] == OP_UNLOCK ? "unlock" : "lock", f[0x0F]);
   } else {
     ESP_LOGD(TAG, "frame %02X %02X sub %02X result %02X", f[0], f[1], f[4], f[0x0F]);
   }

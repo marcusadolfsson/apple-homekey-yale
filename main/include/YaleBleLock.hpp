@@ -92,7 +92,7 @@ private:
   void run();
   bool ensureConnected();
   bool scanAndConnect();
-  bool connectDirect();
+  bool connectDirect(uint32_t timeoutMs);
   bool discover();
   bool writeCccd(uint16_t cccdHandle, uint8_t props, const char *what);
   bool handshake();
