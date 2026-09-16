@@ -74,7 +74,6 @@ ReaderKind g_readerKind = ReaderKind(DOORBELL_DEFAULT_READER);
 INfcReader *g_reader = nullptr;
 bool g_readerReady = false;
 int64_t g_lastInitTryUs = 0;
-uint32_t g_polls = 0;
 // Inverted polling state: the doorbell drives its own reader once the base has
 // given it an ECP frame, and stays quiet on the radio until a card shows up.
 std::array<uint8_t, 18> g_ecp{};
@@ -113,10 +112,12 @@ void linkSecurityInit() {
   nvs_handle_t h;
   std::array<uint8_t, 16> key{};
   bool haveKey = false;
+  bool generated = false;
   if (nvs_open("relay", NVS_READWRITE, &h) == ESP_OK) {
     size_t len = key.size();
     haveKey = nvs_get_blob(h, "key", key.data(), &len) == ESP_OK && len == key.size();
     if (!haveKey) {
+      generated = true;
       esp_fill_random(key.data(), key.size());
       if (nvs_set_blob(h, "key", key.data(), key.size()) == ESP_OK) nvs_commit(h);
       haveKey = true;
@@ -143,10 +144,16 @@ void linkSecurityInit() {
   std::copy_n(digest + 16, 16, g_lmk.begin());
   g_encrypted = esp_now_set_pmk(g_pmk.data()) == ESP_OK;
 
-  std::string hex;
-  for (uint8_t b : key) { char t[3]; snprintf(t, sizeof(t), "%02x", b); hex += t; }
-  ESP_LOGW(TAG, "relay link key: %s", hex.c_str());
-  ESP_LOGW(TAG, "paste that into the base's web page (Hardware -> Link key), once.");
+  // The key is a pairing secret: show it when it is created, and afterwards
+  // only on request (doorbell button held while powering on), not every boot.
+  if (generated || gpio_get_level(PIN_BUTTON) == 0) {
+    std::string hex;
+    for (uint8_t b : key) { char t[3]; snprintf(t, sizeof(t), "%02x", b); hex += t; }
+    ESP_LOGW(TAG, "relay link key: %s", hex.c_str());
+    ESP_LOGW(TAG, "paste that into the base's web page (Hardware -> Link key), once.");
+  } else {
+    ESP_LOGI(TAG, "relay link key in NVS (hold the doorbell button while powering on to print it)");
+  }
   if (g_basePinned) {
     ESP_LOGI(TAG, "base pinned: %02X:%02X:%02X:%02X:%02X:%02X", g_base[0], g_base[1], g_base[2],
              g_base[3], g_base[4], g_base[5]);
@@ -212,10 +219,15 @@ void batteryInit() {
 }
 
 // Two bytes of battery voltage ride along on frames we were sending anyway.
-void appendBattery(std::vector<uint8_t> &out) {
-  const uint16_t mv = readBatteryMv();
-  out.push_back(uint8_t(mv & 0xFF));
-  out.push_back(uint8_t(mv >> 8));
+// The tap announcement uses the last reading rather than sampling the ADC
+// (8 samples + calibration) between seeing the card and announcing it: the
+// voltage cannot change meaningfully between heartbeats, and that frame is
+// the one a tap cannot afford to delay.
+uint16_t g_batteryMv = 0;
+void appendBattery(std::vector<uint8_t> &out, bool fresh) {
+  if (fresh) g_batteryMv = readBatteryMv();
+  out.push_back(uint8_t(g_batteryMv & 0xFF));
+  out.push_back(uint8_t(g_batteryMv >> 8));
 }
 
 // Reassembly for the one request in flight; the base is strictly request/response.
@@ -284,6 +296,13 @@ bool readerInit() {
 
 // Poll our own reader once; announce to the base if a card is there.
 void pollOnce() {
+  if (g_readerReady && !g_reader->isConnected()) {
+    // The reader driver gave up on the bus (see DoorbellPn532Reader): tear the
+    // transport down so the re-init below starts from a fresh bus.
+    ESP_LOGW(TAG, "NFC reader stopped answering; will re-initialise");
+    g_reader->stop();
+    g_readerReady = false;
+  }
   if (!g_readerReady) {
     if (esp_timer_get_time() - g_lastInitTryUs > 5000000) {
       g_lastInitTryUs = esp_timer_get_time();
@@ -291,7 +310,6 @@ void pollOnce() {
     }
     return;
   }
-  std::vector<uint8_t> res;
   // The ECP frame is what makes an iPhone raise the Home Key on its own. It is
   // fire-and-forget (nothing answers it), but a transport-level failure here is
   // invisible except as "taps only work with the key open in Wallet", so report
@@ -306,7 +324,7 @@ void pollOnce() {
   out.push_back(atqa[0]);
   out.push_back(atqa[1]);
   out.push_back(sak);
-  appendBattery(out);
+  appendBattery(out, false);
   g_tagActive = true;  // hold the card; the base will drive APDUs now
   g_tagActiveUs = esp_timer_get_time();
   g_tagPayload = out;
@@ -335,46 +353,8 @@ void checkButton() {
   }
   ESP_LOGI(TAG, "button pressed; telling the base");
   std::vector<uint8_t> payload;
-  appendBattery(payload);
+  appendBattery(payload, false);
   send(g_base, relay::Op::ButtonPress, 0, 0, payload.data(), payload.size());
-}
-
-void handlePoll(const Msg &m, const relay::Header &h, const std::vector<uint8_t> &payload) {
-  if (!g_readerReady) {
-    // Reader missing at boot: retry occasionally so a re-seated cable recovers.
-    if (esp_timer_get_time() - g_lastInitTryUs > 5000000) {
-      g_lastInitTryUs = esp_timer_get_time();
-      readerInit();
-    }
-    send(m.mac, relay::Op::PollRsp, h.seq, 0, nullptr, 0);  // flags bit1 clear = reader not ready
-    return;
-  }
-  if ((++g_polls % 50) == 0) ESP_LOGI(TAG, "%u polls relayed", (unsigned)g_polls);
-  // payload: [18B ECP][4B timeout ms LE]
-  uint32_t timeoutMs = 500;
-  std::vector<uint8_t> ecp;
-  if (payload.size() >= 22) {
-    ecp.assign(payload.begin(), payload.begin() + 18);
-    std::memcpy(&timeoutMs, payload.data() + 18, 4);
-  }
-  // Legacy base-driven path: the ECP frame arrives per request; the reader
-  // transmits whatever g_ecp holds, so drop it in there first.
-  if (!ecp.empty()) std::copy(ecp.begin(), ecp.end(), g_ecp.begin());
-
-  std::vector<uint8_t> uid;
-  std::array<uint8_t, 2> atqa{};
-  uint8_t sak = 0;
-  const bool found = g_reader->pollForTag(uid, atqa, sak, timeoutMs);
-
-  std::vector<uint8_t> out;
-  out.push_back(uint8_t(uid.size()));
-  out.insert(out.end(), uid.begin(), uid.end());
-  out.push_back(atqa[0]);
-  out.push_back(atqa[1]);
-  out.push_back(sak);
-  // bit0 = tag found, bit1 = PN532 healthy
-  send(m.mac, relay::Op::PollRsp, h.seq, uint8_t((found ? 1 : 0) | 2), out.data(), out.size());
-  if (found) ESP_LOGI(TAG, "tag detected (uid %u bytes), relaying to base", (unsigned)uid.size());
 }
 
 void handleApdu(const Msg &m, const relay::Header &h, const std::vector<uint8_t> &payload) {
@@ -417,7 +397,6 @@ void handle(const Msg &m, const relay::Header &h, const std::vector<uint8_t> &pa
         send(g_base, relay::Op::EcpReq, 0, 0, nullptr, 0);
       }
       break;
-    case relay::Op::PollReq: handlePoll(m, h, payload); break;  // legacy path, still supported
     case relay::Op::EcpSet:
       if (payload.size() >= 20) {
         std::memcpy(g_ecp.data(), payload.data(), 18);
@@ -522,7 +501,7 @@ extern "C" void app_main() {
   gpio_config(&btn);
   ESP_LOGI(TAG, "doorbell button on GPIO%d (wire it to GND)", PIN_BUTTON);
   batteryInit();
-  const uint16_t mv = readBatteryMv();
+  const uint16_t mv = g_batteryMv = readBatteryMv();
   if (mv) ESP_LOGI(TAG, "battery %u mV", mv);
   else ESP_LOGI(TAG, "no battery divider on A0; reporting battery as unknown");
 
@@ -566,7 +545,7 @@ extern "C" void app_main() {
           esp_timer_get_time() - g_lastHeartbeatUs > 30000000) {
         g_lastHeartbeatUs = esp_timer_get_time();
         std::vector<uint8_t> hb;
-        appendBattery(hb);
+        appendBattery(hb, true);
         send(g_base, relay::Op::HealthRsp, 0, g_readerReady ? 2 : 0, hb.data(), hb.size());
       }
       // Silence means the base restarted or its AP moved channel. This has to
@@ -629,7 +608,7 @@ extern "C" void app_main() {
       const size_t n = m.len - relay::HDR;
       if (off + n <= g_asm.buf.size()) std::memcpy(g_asm.buf.data() + off, m.data + relay::HDR, n);
       if (++g_asm.got < g_asm.fragCnt) continue;
-      payload = g_asm.buf;
+      payload = std::move(g_asm.buf);  // re-assigned on the next first fragment
       g_asm.op = 0;
     }
     handle(m, h, payload);

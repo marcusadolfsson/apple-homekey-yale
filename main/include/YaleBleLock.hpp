@@ -171,12 +171,12 @@ private:
   bool m_addrKnown = false;    // lock address type learned from a scan; lets us connect directly
   bool m_gattCached = false;   // handles from a previous discovery; the lock's GATT table is static
   int64_t m_lastRxUs = 0;
+  int64_t m_lastCmdRxUs = 0;  // command channel only: what cooldown() spaces
 
   mbedtls_aes_context m_ecbEnc{}, m_ecbDec{};
   mbedtls_aes_context m_cbcEnc{}, m_cbcDec{};
   std::array<uint8_t, 16> m_ivEnc{}, m_ivDec{};
 
   AppEventLoop::SubscriptionHandle m_nfcSub;
-  AppEventLoop::SubscriptionHandle m_tagSub;
   AppEventLoop::SubscriptionHandle m_targetSub;
 };

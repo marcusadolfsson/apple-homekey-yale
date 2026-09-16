@@ -2176,7 +2176,7 @@ std::string WebServerManager::getDeviceMetrics() {
   status.addNumber("free_heap", esp_get_free_heap_size());
   status.addNumber("wifi_rssi", WiFi.RSSI());
   status.addBool("nfc_connected", m_nfcManager ? m_nfcManager->isConnected() : false);
-  {
+  if (m_configManager.getConfig<espConfig::misc_config_t>().nfcReaderType == 4) {
     // Relay reader (type 4): whether a doorbell is paired and how strong the link is.
     const auto relay = RemoteNfcReader::linkStatus();
     status.addBool("relay_paired", relay.paired);

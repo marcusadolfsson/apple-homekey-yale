@@ -110,13 +110,13 @@ private:
 
   // Relay latency instrumentation for the test.
   uint32_t m_apduCount = 0, m_apduTotalUs = 0, m_apduMaxUs = 0;
-  uint32_t m_pollsSent = 0, m_pollsAnswered = 0;
   bool m_readerReady = false;
   int8_t m_linkRssi = 0;  // of the last frame heard from the doorbell
   uint16_t m_batteryMv = 0;  // 0 = unknown (no divider fitted / USB powered)
   void noteBattery(const uint8_t *tail, size_t len);
-  // These mirror NfcManager::pollingTask() exactly, because the doorbell is
-  // running the same poll loop remotely. LISTEN_WINDOW_MS is how long the
+  // The doorbell runs the same shape of loop NfcManager::pollingTask() runs for
+  // a local reader (500 ms listen window), but with a tighter gap between
+  // cycles: the doorbell has nothing else to do. LISTEN_WINDOW_MS is how long the
   // reader holds the field open waiting for a card: an iPhone needs most of
   // that to see the ECP frame and put the Home Key up, so shortening it is what
   // kills the tap animation. POLL_DELAY_MS is the quiet gap between cycles,
@@ -131,7 +131,6 @@ private:
   static constexpr int64_t HEARTBEAT_TIMEOUT_MS = 90000;
   int64_t m_lastHeardUs = 0;
   int64_t m_lastSilenceLogUs = 0;
-  int64_t m_lastStatUs = 0;
   int64_t m_lastHelloUs = 0;
 
   static constexpr const char *TAG = "RelayReader";

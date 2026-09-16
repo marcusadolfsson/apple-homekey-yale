@@ -282,8 +282,10 @@ void NfcManager::pollingTask() {
     }
 
     const uint16_t passiveTargetTimeoutMs = 500;
+    // The relay reader blocks on its announcement queue, which paces the loop
+    // by itself; a delay on top only adds latency to the next tap.
     const TickType_t pollDelayTicks =
-        pdMS_TO_TICKS(m_nfcFastPollingEnabled ? 5 : 100);
+        m_nfcReaderType == RELAY_ESPNOW ? 0 : pdMS_TO_TICKS(m_nfcFastPollingEnabled ? 5 : 100);
 
     ESP_LOGI(TAG,
              "NFC poll tuning active: delay=%lu ms, passiveTimeout=%u ms",
@@ -342,9 +344,6 @@ void NfcManager::pollingTask() {
         uint8_t sak;
         if (m_reader->pollForTag(uid, atqa, sak, passiveTargetTimeoutMs)) {
             ESP_LOGI(TAG, "NFC tag detected!");
-            // Fired before authentication so a lock driver can start connecting
-            // in parallel: the BLE connection is the slowest step by far.
-            AppEventLoop::publish(NFC_EVENT, NFC_TAG_DETECTED, nullptr, 0);
             handleTagPresence(uid, atqa, sak);
             waitForTagRemoval();
         }
@@ -413,7 +412,9 @@ void NfcManager::waitForTagRemoval() {
             m_reader->releaseTag();
             break;
         }
-        vTaskDelay(pdMS_TO_TICKS(60));
+        // On the relay every presence check is a radio round trip; 60 ms is
+        // right for a local reader, not for that.
+        vTaskDelay(pdMS_TO_TICKS(m_nfcReaderType == RELAY_ESPNOW ? 250 : 60));
     }
     m_reader->releaseTag();
 }

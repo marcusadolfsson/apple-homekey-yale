@@ -576,7 +576,7 @@ void MqttManager::publishHassDiscovery() {
 
         fillPayload(payload);
 
-        std::string payloadStr = payload.toStringFormatted();
+        std::string payloadStr = payload.toStringUnformatted();  // retained on the broker; no need for indentation
         std::string topic = "homeassistant/" + topicSuffix;
         publish(topic, payloadStr, 1, true);
     };

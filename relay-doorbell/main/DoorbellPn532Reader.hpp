@@ -85,11 +85,22 @@ public:
     if (m_lastCycleUs) { m_sumCycle += ecpStart - m_lastCycleUs; m_sumEcp += ecpDone - ecpStart; ++m_cycles; }
     m_lastCycleUs = ecpStart;
     if (m_cycles == 1000) {
-      ESP_LOGI(TAG, "poll cycle: %lld ms avg (ECP transmit %lld ms of it) -> ECP at %.1f Hz",
+      ESP_LOGD(TAG, "poll cycle: %lld ms avg (ECP transmit %lld ms of it) -> ECP at %.1f Hz",
                m_sumCycle / m_cycles / 1000, m_sumEcp / m_cycles / 1000, 1000000.0 * m_cycles / double(m_sumCycle));
       m_cycles = 0; m_sumCycle = 0; m_sumEcp = 0;
     }
-    return m_pn532->InListPassiveTarget(0x00, uid, atqa, sak, uint16_t(timeoutMs)) == pn532::Status::SUCCESS;
+    const auto st = m_pn532->InListPassiveTarget(0x00, uid, atqa, sak, uint16_t(timeoutMs));
+    // "No card" is the normal answer. Anything else, repeatedly, means the bus
+    // or the chip is gone; report disconnected so main.cpp re-initialises
+    // instead of logging an error 15 times a second forever.
+    if (st == pn532::Status::SUCCESS || st == pn532::Status::TIMEOUT || st == pn532::Status::NO_TAGS_FOUND) {
+      m_consecutiveFailures = 0;
+    } else if (++m_consecutiveFailures >= 20) {
+      ESP_LOGE(TAG, "PN532 not responding (%d consecutive bus errors)", m_consecutiveFailures);
+      m_consecutiveFailures = 0;
+      m_connected = false;
+    }
+    return st == pn532::Status::SUCCESS;
   }
 
   bool isTagStillPresent() override {
@@ -130,4 +141,5 @@ private:
   int m_lastEcpStatus = -1;
   int64_t m_lastCycleUs = 0, m_sumCycle = 0, m_sumEcp = 0;
   int m_cycles = 0;
+  int m_consecutiveFailures = 0;
 };

@@ -85,6 +85,46 @@ the base within good range of the lock and re-measure before blaming anything el
 - A failed connect used to clear the GATT cache, making every retry pay for
   rediscovery. A connection failure says nothing about the GATT layout.
 
+### Efficiency audit (2026-09-16)
+
+Done in one pass after the relay stabilised; the reasoning, so it is not undone:
+
+- **Cooldown timed from command-channel traffic only** (`m_lastCmdRxUs`). The
+  250 ms write spacing protects the lock's radio between *command* writes;
+  timing it from the last handshake frame made the first unlock of every
+  session wait ~150–220 ms for nothing.
+- **Stale announcements drained in one `pollForTag()` call**, and no between-poll
+  delay for the relay reader (the queue wait already paces it): each stale
+  entry used to cost a full 100 ms poll cycle. Tag-removal presence checks run
+  every 250 ms on the relay (each is a radio round trip), 60 ms locally.
+- **Hot-path logs to debug**: per-APDU round trip, relay summary, ECP hex on
+  push, "doorbell asked for ECP", the doorbell's poll-cycle stats. Keep them at
+  debug — they were the evidence for every fix in this file, but 8–12 INFO lines
+  per tap ran during the timing-critical transaction and once starved the WebSocket.
+- **BLE scan**: `filter_duplicates = 1`; the per-device Yale report is only
+  parsed and posted at debug level (it ran on the NimBLE host task for every
+  advertisement during every scan).
+- **PN532 I2C transport**: probe 0x24 (three tries — a cold PN532 does not ACK
+  its very first transaction) and sweep the bus only if that fails; the
+  unconditional 112-probe sweep cost up to 2.2 s per reader init. Bus-error
+  logs throttled to one per 5 s per site; after 20 consecutive bus errors the
+  reader reports disconnected so the 5 s re-init actually runs (the ready flag
+  never cleared before, and a wedged bus logged an error 15×/s forever).
+- **Doorbell**: legacy base-driven `PollReq` path removed (nothing sends it);
+  link key printed only when generated or with the button held at power-on;
+  battery ADC burst taken on the heartbeat and cached for tap/button frames
+  (it sat between seeing the card and announcing it); reassembly buffer moved
+  rather than copied; no 260-byte zero-init per frame in the receive callback.
+- Housekeeping: `Response` objects drained before their queues are deleted;
+  dead counters and the unsubscribed `NFC_TAG_DETECTED` publish removed; relay
+  metrics only emitted for reader type 4; HA discovery JSON unformatted.
+
+**Rejected on purpose:** relaxing the connection interval during the 5 s linger
+(would cut radio contention but slow the measured 437 ms warm tap); the PN532
+transport's fixed 301-byte reads (~7 ms per response — real, but that reader is
+being replaced and the fix depends on PN532 re-serve semantics to verify on
+hardware); interrupt-driven button and RTC-retained link state (deep-sleep work).
+
 ## Yale BLE protocol (as implemented in `YaleBleLock`)
 
 Service `0xFE24`; every frame is 18 bytes (a 16-byte AES block plus two plain bytes).

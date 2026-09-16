@@ -1,6 +1,7 @@
 #include "Pn532I2cTransport.hpp"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "fmt/ranges.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -13,6 +14,16 @@ static const char *TAG = "PN532::I2C";
 namespace {
 constexpr uint8_t ACK_FRAME[6] = {0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00};
 }
+
+// A wedged bus makes every poll cycle (~15/s) fail; at 115200 baud one error
+// line costs ~7 ms, so unthrottled logging becomes the dominant load. One line
+// per 5 s per site is plenty to see what is wrong.
+#define LOG_THROTTLED(stmt)                                              \
+  do {                                                                   \
+    static int64_t lastUs_ = 0;                                          \
+    const int64_t now_ = esp_timer_get_time();                           \
+    if (now_ - lastUs_ > 5000000) { lastUs_ = now_; stmt; }              \
+  } while (0)
 
 Pn532I2cTransport::Pn532I2cTransport(gpio_num_t sda, gpio_num_t scl, uint32_t hz) {
   i2c_master_bus_config_t buscfg = {};
@@ -44,19 +55,27 @@ Pn532I2cTransport::Pn532I2cTransport(gpio_num_t sda, gpio_num_t scl, uint32_t hz
   }
   m_tx.reserve(64);
 
-  // Bring-up diagnostics: report the pins in use and what answers on the bus.
-  ESP_LOGW(TAG, "PN532 I2C on SDA=%d SCL=%d @ %lu Hz", sda, scl, (unsigned long)hz);
-  std::string found;
-  for (uint16_t addr = 0x08; addr < 0x78; ++addr) {
-    if (i2c_master_probe(m_bus, addr, 20) == ESP_OK) {
-      found += fmt::format(" 0x{:02X}", addr);
-    }
+  ESP_LOGI(TAG, "PN532 I2C on SDA=%d SCL=%d @ %lu Hz", sda, scl, (unsigned long)hz);
+  // Probe the one address that matters. The full bus sweep (112 probes at 20 ms
+  // each, up to ~2.2 s on a dead bus) only runs when the PN532 does not answer,
+  // and this constructor runs again on every reader re-init.
+  // A cold PN532 does not ACK its very first I2C transaction (the probe is
+  // what wakes it), so give it a couple of tries before concluding it is gone.
+  bool present = false;
+  for (int attempt = 0; attempt < 3 && !present; ++attempt) {
+    present = i2c_master_probe(m_bus, ADDRESS, 20) == ESP_OK;
+    if (!present) vTaskDelay(pdMS_TO_TICKS(10));
   }
-  if (found.empty()) {
-    ESP_LOGE(TAG, "I2C scan: no devices answered (check wiring, VCC, and that DIP is in I2C mode then power-cycle)");
-  } else {
-    ESP_LOGW(TAG, "I2C scan found:%s%s", found.c_str(),
-             found.find("0x24") == std::string::npos ? " (PN532 expected at 0x24)" : "");
+  if (!present) {
+    std::string found;
+    for (uint16_t addr = 0x08; addr < 0x78; ++addr) {
+      if (i2c_master_probe(m_bus, addr, 20) == ESP_OK) found += fmt::format(" 0x{:02X}", addr);
+    }
+    if (found.empty()) {
+      ESP_LOGE(TAG, "no PN532 at 0x24 and nothing else on the bus (check wiring, VCC, DIP in I2C mode; power-cycle)");
+    } else {
+      ESP_LOGE(TAG, "no PN532 at 0x24; the bus answered at:%s", found.c_str());
+    }
   }
 }
 
@@ -122,7 +141,7 @@ bool Pn532I2cTransport::flushWrite() {
     vTaskDelay(pdMS_TO_TICKS(2));
   }
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "write failed: 0x%x (%s)", err, esp_err_to_name(err));
+    LOG_THROTTLED(ESP_LOGE(TAG, "write failed: 0x%x (%s)", err, esp_err_to_name(err)));
     m_tx.clear();
     return false;
   }
@@ -158,12 +177,12 @@ pn532::Status Pn532I2cTransport::prepareRead() {
   m_expectAck = false;
   esp_err_t err = i2c_master_receive(m_dev, m_rx.data(), len, XFER_TIMEOUT_MS);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "read failed: 0x%x (%s)", err, esp_err_to_name(err));
+    LOG_THROTTLED(ESP_LOGE(TAG, "read failed: 0x%x (%s)", err, esp_err_to_name(err)));
     m_rxLen = m_rxPos = 0;
     return pn532::Status::TRANSPORT_ERROR;
   }
   if (!(m_rx[0] & 0x01)) {
-    ESP_LOGE(TAG, "read: PN532 not ready (status 0x%02X)", m_rx[0]);
+    LOG_THROTTLED(ESP_LOGE(TAG, "read: PN532 not ready (status 0x%02X)", m_rx[0]));
     m_rxLen = m_rxPos = 0;
     return pn532::Status::TRANSPORT_ERROR;
   }
@@ -174,7 +193,7 @@ pn532::Status Pn532I2cTransport::prepareRead() {
 
 pn532::Status Pn532I2cTransport::readChunk(pn532::span<uint8_t> buffer) {
   if (m_rxPos + buffer.size() > m_rxLen) {
-    ESP_LOGE(TAG, "readChunk: %d bytes requested, %d buffered", buffer.size(), m_rxLen - m_rxPos);
+    LOG_THROTTLED(ESP_LOGE(TAG, "readChunk: %d bytes requested, %d buffered", buffer.size(), m_rxLen - m_rxPos));
     return pn532::Status::TRANSPORT_ERROR;
   }
   std::copy_n(m_rx.data() + m_rxPos, buffer.size(), buffer.data());

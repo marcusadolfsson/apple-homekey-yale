@@ -94,7 +94,7 @@ void RemoteNfcReader::recvTrampoline(const esp_now_recv_info_t *info, const uint
   auto *self = s_instance;
   if (!self || !self->m_rx || len < (int)relay::HDR) return;
   if (!self->macAllowed(info->src_addr)) return;
-  Msg m{};
+  Msg m;  // every field used is written below; no need to zero 260 bytes per frame
   if (info->rx_ctrl) self->m_linkRssi = info->rx_ctrl->rssi;
   self->m_lastHeardUs = esp_timer_get_time();
   std::memcpy(m.mac, info->src_addr, 6);
@@ -164,8 +164,13 @@ void RemoteNfcReader::stop() {
   esp_now_unregister_recv_cb();
   if (m_rxTask) { vTaskDelete(m_rxTask); m_rxTask = nullptr; }
   if (m_rx) { vQueueDelete(m_rx); m_rx = nullptr; }
-  if (m_responses) { vQueueDelete(m_responses); m_responses = nullptr; }
-  if (m_tagEvents) { vQueueDelete(m_tagEvents); m_tagEvents = nullptr; }
+  for (QueueHandle_t *q : {&m_responses, &m_tagEvents}) {
+    if (!*q) continue;
+    Response *r = nullptr;
+    while (xQueueReceive(*q, &r, 0) == pdTRUE) delete r;  // heap objects still queued
+    vQueueDelete(*q);
+    *q = nullptr;
+  }
   m_started = false;
   m_doorbellKnown = false;
 }
@@ -182,7 +187,7 @@ void RemoteNfcReader::rxTask() {
   std::vector<uint8_t> buf;
 
   while (true) {
-    Msg m{};
+    Msg m;
     if (xQueueReceive(m_rx, &m, portMAX_DELAY) != pdTRUE) continue;
     relay::Header h{};
     std::memcpy(&h, m.data, relay::HDR);
@@ -239,7 +244,7 @@ void RemoteNfcReader::rxTask() {
       continue;
     }
     if (relay::Op(h.op) == relay::Op::EcpReq) {
-      ESP_LOGI(TAG, "doorbell asked for ECP data");
+      ESP_LOGD(TAG, "doorbell asked for ECP data");
       sendEcp();
       continue;
     }
@@ -256,7 +261,7 @@ void RemoteNfcReader::rxTask() {
       const size_t n = m.len - relay::HDR;
       if (off + n <= buf.size()) std::memcpy(buf.data() + off, m.data + relay::HDR, n);
       if (++got < fragCnt) continue;
-      payload = buf;
+      payload = std::move(buf);  // buf is re-assigned on the next first fragment
       op = 0;
     }
 
@@ -348,12 +353,17 @@ bool RemoteNfcReader::pollForTag(std::vector<uint8_t> &uid, std::array<uint8_t, 
     // so the base sends nothing at all between taps.
     Response *r = nullptr;
     if (xQueueReceive(m_tagEvents, &r, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) return false;
-    if (esp_timer_get_time() - r->receivedUs > TAG_EVENT_MAX_AGE_US) {
-      ESP_LOGW(TAG, "dropping a stale tap announcement (%lld ms old)",
-               (esp_timer_get_time() - r->receivedUs) / 1000);
+    // The doorbell repeats an announcement, so several can be queued; drop the
+    // stale ones here in one go rather than paying a poll cycle for each.
+    int stale = 0;
+    while (esp_timer_get_time() - r->receivedUs > TAG_EVENT_MAX_AGE_US) {
+      ++stale;
       delete r;
-      return false;
+      r = nullptr;
+      if (xQueueReceive(m_tagEvents, &r, 0) != pdTRUE) break;
     }
+    if (stale) ESP_LOGW(TAG, "dropped %d stale tap announcement(s)", stale);
+    if (!r) return false;
     const std::vector<uint8_t> p = std::move(r->payload);
     delete r;
     if (p.empty() || p.size() < size_t(1 + p[0] + 3)) return false;
@@ -365,9 +375,10 @@ bool RemoteNfcReader::pollForTag(std::vector<uint8_t> &uid, std::array<uint8_t, 
     m_apduCount = m_apduTotalUs = m_apduMaxUs = 0;
     return true;
   }
-  if (!m_doorbellKnown) {
-    // The doorbell stops pinging once paired, so after a base restart nobody is
-    // looking for anybody. Advertise until a doorbell answers.
+  {
+    // Not paired (the paired case returned above). The doorbell stops pinging
+    // once paired, so after a base restart nobody is looking for anybody:
+    // advertise until a doorbell answers.
     const int64_t now = esp_timer_get_time();
     if (now - m_lastHelloUs > 3000000) {
       m_lastHelloUs = now;
@@ -410,7 +421,7 @@ void RemoteNfcReader::sendEcp() {
   {
     char hex[3 * 18 + 1];
     for (int i = 0; i < 18; ++i) snprintf(hex + 3 * i, 4, "%02X ", m_ecpData[i]);
-    ESP_LOGI(TAG, "pushing ECP frame: %s", hex);
+    ESP_LOGD(TAG, "pushing ECP frame: %s", hex);
   }
   send(m_doorbell, relay::Op::EcpSet, ++m_seq, 0, payload, sizeof(payload));
 }
@@ -432,7 +443,7 @@ bool RemoteNfcReader::exchangeApdu(const std::vector<uint8_t> &send_, std::vecto
   m_apduCount++;
   m_apduTotalUs += us;
   m_apduMaxUs = std::max(m_apduMaxUs, us);
-  ESP_LOGI(TAG, "apdu %u -> %u bytes, relay round trip %u us", (unsigned)send_.size(),
+  ESP_LOGD(TAG, "apdu %u -> %u bytes, relay round trip %u us", (unsigned)send_.size(),
            (unsigned)rsp.payload.size(), us);
   if (!rsp.flags) return false;
   recv = std::move(rsp.payload);
@@ -460,7 +471,7 @@ void RemoteNfcReader::releaseTag() {
     (void)request(relay::Op::ReleaseReq, nullptr, 0, relay::Op::ReleaseRsp, 500, rsp);
   }
   if (m_apduCount) {
-    ESP_LOGI(TAG, "relay summary: %u APDUs, avg %u us, max %u us, total %u ms added by the link",
+    ESP_LOGD(TAG, "relay summary: %u APDUs, avg %u us, max %u us, total %u ms added by the link",
              m_apduCount, m_apduTotalUs / m_apduCount, m_apduMaxUs, m_apduTotalUs / 1000);
     m_apduCount = m_apduTotalUs = m_apduMaxUs = 0;
   }

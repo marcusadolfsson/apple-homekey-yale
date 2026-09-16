@@ -281,7 +281,10 @@ int YaleBleLock::gapEvent(ble_gap_event *event, void *arg) {
           }
           uint64_t key = 0;
           for (int i = 0; i < 6; ++i) key |= uint64_t(a.val[i]) << (8 * i);
-          if (yaleish && std::find(s_seenYale.begin(), s_seenYale.end(), key) == s_seenYale.end()) {
+          // The per-device report is a diagnostic; parsing and posting it runs on
+          // the NimBLE host task during every scan, so only do it when asked for.
+          if (yaleish && esp_log_level_get(TAG) >= ESP_LOG_DEBUG &&
+              std::find(s_seenYale.begin(), s_seenYale.end(), key) == s_seenYale.end()) {
             // Logging here runs on the NimBLE host task's small stack and can stall
             // it; hand the report to the worker instead.
             s_seenYale.push_back(key);
@@ -449,7 +452,7 @@ bool YaleBleLock::waitFor(EvType type, uint32_t timeoutMs, Ev &out) {
         Frame f = ev.frame;
         cbcDecrypt(f.data());
         if (simpleChecksum(f.data()) == 0 && (f[0] == 0xAA || f[0] == 0xBB)) {
-          m_lastRxUs = esp_timer_get_time();
+          m_lastRxUs = m_lastCmdRxUs = esp_timer_get_time();
           handleCommandFrame(f);
         }
         break;
@@ -536,7 +539,7 @@ void YaleBleLock::run() {
         Frame f = ev.frame;
         cbcDecrypt(f.data());
         if (simpleChecksum(f.data()) == 0 && (f[0] == 0xAA || f[0] == 0xBB)) {
-          m_lastRxUs = esp_timer_get_time();
+          m_lastRxUs = m_lastCmdRxUs = esp_timer_get_time();
           handleCommandFrame(f);
         } else {
           ESP_LOGW(TAG, "invalid pushed frame dropped");
@@ -691,7 +694,7 @@ bool YaleBleLock::scanAndConnect() {
   struct AttemptGuard { AttemptGuard() { g_bleLinkAttempt.store(true, std::memory_order_release); }
                         ~AttemptGuard() { g_bleLinkAttempt.store(false, std::memory_order_release); } } attempt;
   ble_gap_disc_params dp{};
-  dp.filter_duplicates = 0;  // keep reporting while the diagnostics run
+  dp.filter_duplicates = 1;  // one report per device; the diagnostics only need that
   dp.passive = 0;            // active: the local name usually arrives in the scan response
   dp.itvl = 0x0060;          // 60 ms
   dp.window = 0x0056;        // ~54 ms
@@ -806,7 +809,11 @@ bool YaleBleLock::writeFrame(uint16_t handle, const Frame &frame) {
 }
 
 void YaleBleLock::cooldown() {
-  int64_t since = esp_timer_get_time() - m_lastRxUs;
+  // Spaces successive command-channel writes (sending too fast can crash the
+  // lock's radio). Timed from command-channel traffic only: timing it from the
+  // last handshake frame made the first unlock of every session wait out most
+  // of the 250 ms for nothing.
+  int64_t since = esp_timer_get_time() - m_lastCmdRxUs;
   if (since < COOLDOWN_US) vTaskDelay(pdMS_TO_TICKS((COOLDOWN_US - since) / 1000 + 1));
 }
 
@@ -892,7 +899,7 @@ bool YaleBleLock::sendCommand(uint8_t opcode, uint8_t subtype, uint8_t expectFla
     }
     Frame f = ev.frame;
     cbcDecrypt(f.data());
-    m_lastRxUs = esp_timer_get_time();
+    m_lastRxUs = m_lastCmdRxUs = esp_timer_get_time();
     if (simpleChecksum(f.data()) != 0 || (f[0] != 0xAA && f[0] != 0xBB)) {
       ESP_LOGW(TAG, "invalid frame in response to opcode 0x%02X", opcode);
       continue;
