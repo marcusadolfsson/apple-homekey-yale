@@ -437,9 +437,18 @@ bool RemoteNfcReader::isTagStillPresent() {
 }
 
 void RemoteNfcReader::releaseTag() {
-  if (g_bleRadioBusy.load(std::memory_order_acquire)) return;
-  Response rsp;
-  (void)request(relay::Op::ReleaseReq, nullptr, 0, relay::Op::ReleaseRsp, 500, rsp);
+  // A successful tap sets g_bleRadioBusy the instant the unlock is requested,
+  // i.e. before we get here. Skipping the release when busy meant the doorbell
+  // never heard ReleaseReq after any *successful* tap and sat holding the card
+  // until its own timeout: a 5 s blind window after every good tap. One small
+  // frame is nothing next to a BLE connect, so always send it; only the wait
+  // for the reply is skipped while the link is busy.
+  if (g_bleRadioBusy.load(std::memory_order_acquire)) {
+    send(m_doorbell, relay::Op::ReleaseReq, ++m_seq, 0, nullptr, 0);
+  } else {
+    Response rsp;
+    (void)request(relay::Op::ReleaseReq, nullptr, 0, relay::Op::ReleaseRsp, 500, rsp);
+  }
   if (m_apduCount) {
     ESP_LOGI(TAG, "relay summary: %u APDUs, avg %u us, max %u us, total %u ms added by the link",
              m_apduCount, m_apduTotalUs / m_apduCount, m_apduMaxUs, m_apduTotalUs / 1000);

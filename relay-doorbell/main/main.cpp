@@ -621,8 +621,11 @@ extern "C" void app_main() {
         send(g_base, relay::Op::TagEvent, 0, 3, g_tagPayload.data(), g_tagPayload.size());
       }
       // A base that stops driving APDUs after a tap should not wedge us.
-      if (g_tagActive && esp_timer_get_time() - g_tagActiveUs > 5000000) {
-        ESP_LOGW(TAG, "no APDUs after announcing a tag; resuming polling");
+      // Fallback only: the base releases us explicitly. Auth completes in
+      // ~0.3 s, so 2 s bounds the blind window if that release ever goes
+      // missing, without cutting a slow transaction short.
+      if (g_tagActive && esp_timer_get_time() - g_tagActiveUs > 2000000) {
+        ESP_LOGW(TAG, "no release from the base 2 s after the tag; resuming polling");
         (void)g_pn532->InRelease(1);
         g_tagActive = false;
       }

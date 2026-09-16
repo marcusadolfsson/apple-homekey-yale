@@ -154,8 +154,13 @@ in the clear because ESP-NOW cannot encrypt broadcast.
   free for BLE. The announcement is **repeated up to 4× at 250 ms** until an APDU
   arrives — it is the one frame a tap cannot afford to lose, and at −67 dBm a
   single frame went missing often enough to cost whole taps. The doorbell holds the
-  card until `ReleaseReq` (or 5 s). Every doorbell frame carries the reader-ready
-  bit in its flags; the base tracks it continuously.
+  card until `ReleaseReq` (or a 2 s fallback). **The base must send that release
+  even while BLE holds the radio**: a successful tap sets `g_bleRadioBusy` the
+  instant the unlock is requested, so a "skip when busy" guard in `releaseTag()`
+  meant no release after any *successful* tap and a 5 s blind window after every
+  good one (a tap 2 s after another was invisible). One frame is nothing next to
+  a BLE connect; only the wait for the reply is skipped while busy. Every doorbell
+  frame carries the reader-ready bit in its flags; the base tracks it continuously.
 - `ApduReq/Rsp`, `PresentReq/Rsp`, `ReleaseReq/Rsp` — the transaction itself.
 - `HealthRsp` — unsolicited heartbeat every 30 s; liveness is inferred from traffic
   received rather than polled for (`HEARTBEAT_TIMEOUT_MS`). **The base answers it
