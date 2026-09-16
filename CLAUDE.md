@@ -50,9 +50,35 @@ single device with hourly check-ins.
 **Apple's HomeKey tolerates the relay** — the iPhone completed transactions with
 80–160 ms per exchange. That was the risk that could have sunk architecture B.
 
-Yale unlock: ~1.9 s to connect (cached address and handles), unlock complete ~4.7 s
-after the request. Idle current target for a battery doorbell is ~20–30 µA
-(ST25R3916 wake-up mode ~3 µA + C6 deep sleep 7 µA + regulator).
+**Tap to door open: ~3.2 s** next to the lock, broken down:
+
+| Stage | Time |
+|---|---|
+| HomeKey exchange (relayed) | 307 ms |
+| BLE connect (cached address, no scan or discovery) | 722 ms |
+| Secure handshake (30 ms connection interval) | 367 ms |
+| **The lock's own unlock and reply** | **1.77 s** |
+
+Over half of what remains is the lock itself. Idle current target for a battery
+doorbell is ~20–30 µA (ST25R3916 wake-up mode ~3 µA + C6 deep sleep 7 µA + regulator).
+
+**Range dominates everything.** The same firmware, with Home Assistant out of the
+picture entirely: next to the lock, connect 722 ms and unlock 2.9 s; well away from
+it, the cached-address connect fails outright, a scan takes 2.6 s and the unlock
+takes 9.9 s. Weak signal, not contention, explained our worst measurements — keep
+the base within good range of the lock and re-measure before blaming anything else.
+
+### Tried and reverted
+
+- **Disabling WiFi power save** on the base to cut relay latency: saved ~10 ms on the
+  link but made BLE connects 3–4× slower (1.9 s → 4.8–8.0 s). One radio, shared.
+- **Connecting to the lock speculatively when a card is detected**, to overlap the
+  ~2 s connect with authentication: corrupted the card exchange itself
+  ("Auth0 response invalid", a 112-byte APDU answered with 0 bytes) and pushed the
+  connect to 15.8 s. **Do not run BLE and the NFC relay at the same time.**
+  `g_bleRadioBusy` now pauses all relay traffic while the lock link is up.
+- A failed connect used to clear the GATT cache, making every retry pay for
+  rediscovery. A connection failure says nothing about the GATT layout.
 
 ## Yale BLE protocol (as implemented in `YaleBleLock`)
 
@@ -145,6 +171,14 @@ which is *not encrypted* — enable flash encryption before deploying.
 1. **The base polls the doorbell ~10×/s.** Fine on mains, fatal on battery. Invert
    it: the doorbell should detect a card itself (ST25R3916 low-power detection) and
    announce it.
+0. **Lock sharing.** The lock accepts very few simultaneous BLE connections, and
+   Home Assistant connects to refresh state after each unlock. At normal tap spacing
+   and range this costs at most a retry, but if collisions show up in daily use the
+   fix is for HA to take front-door state from this reader over MQTT and stop
+   connecting itself. The reader and HA currently share one offline key and slot:
+   that is safe per-session (each connection derives fresh session keys) but means a
+   key rotation breaks both at once, and unlocks cannot be attributed to a person.
+   A dedicated slot for the reader is the eventual answer.
 2. **Relay round trips average 77 ms**, well above ESP-NOW's ~5–15 ms. Suspect WiFi
    contention on the base. Next: pin the channel, quieten logging, consider raw
    802.15.4.

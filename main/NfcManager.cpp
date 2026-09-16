@@ -337,6 +337,9 @@ void NfcManager::pollingTask() {
         uint8_t sak;
         if (m_reader->pollForTag(uid, atqa, sak, passiveTargetTimeoutMs)) {
             ESP_LOGI(TAG, "NFC tag detected!");
+            // Fired before authentication so a lock driver can start connecting
+            // in parallel: the BLE connection is the slowest step by far.
+            AppEventLoop::publish(NFC_EVENT, NFC_TAG_DETECTED, nullptr, 0);
             handleTagPresence(uid, atqa, sak);
             waitForTagRemoval();
         }

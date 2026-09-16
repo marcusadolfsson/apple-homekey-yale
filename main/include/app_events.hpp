@@ -13,6 +13,7 @@ ESP_EVENT_DECLARE_BASE(NFC_EVENT);
 enum {
     NFC_TAP_EVENT,
     NFC_STATUS_CHANGED,
+    NFC_TAG_DETECTED,  // a card is in the field; auth has not run yet
 };
 
 ESP_EVENT_DECLARE_BASE(HK_EVENT);

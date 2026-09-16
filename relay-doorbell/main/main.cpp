@@ -166,6 +166,17 @@ void handleApdu(const Msg &m, const relay::Header &h, const std::vector<uint8_t>
 
 void handle(const Msg &m, const relay::Header &h, const std::vector<uint8_t> &payload) {
   switch (relay::Op(h.op)) {
+    case relay::Op::Ping:
+      // A base is looking for a doorbell (it restarted, or we paired before it did).
+      send(m.mac, relay::Op::Pong, h.seq, g_pn532Ready ? 2 : 0, nullptr, 0);
+      if (!g_baseKnown) {
+        std::memcpy(g_base, m.mac, 6);
+        g_baseKnown = true;
+        addPeer(g_base);
+        ESP_LOGI(TAG, "base said hello: %02X:%02X:%02X:%02X:%02X:%02X", g_base[0], g_base[1],
+                 g_base[2], g_base[3], g_base[4], g_base[5]);
+      }
+      break;
     case relay::Op::Pong:
       if (!g_baseKnown) {
         std::memcpy(g_base, m.mac, 6);
@@ -236,6 +247,10 @@ extern "C" void app_main() {
   ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
   ESP_ERROR_CHECK(esp_wifi_start());
+  // Test build: keep the receiver on so relay latency reflects the link itself.
+  // A battery build would leave power save on and accept the extra delay, or
+  // sleep entirely between taps.
+  ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
   ESP_ERROR_CHECK(esp_now_init());
   ESP_ERROR_CHECK(esp_now_register_recv_cb(onRecv));
   addPeer(BROADCAST);
@@ -249,9 +264,21 @@ extern "C" void app_main() {
 
   findBase();
 
+  int64_t lastRequestUs = esp_timer_get_time();
   while (true) {
     Msg m{};
-    if (xQueueReceive(g_rx, &m, portMAX_DELAY) != pdTRUE) continue;
+    // If the base has been silent for a while it has probably restarted or moved
+    // channel: go back to searching rather than waiting forever.
+    if (xQueueReceive(g_rx, &m, pdMS_TO_TICKS(1000)) != pdTRUE) {
+      if (g_baseKnown && esp_timer_get_time() - lastRequestUs > 30000000) {
+        ESP_LOGW(TAG, "no requests for 30 s; searching for a base again");
+        g_baseKnown = false;
+        findBase();
+        lastRequestUs = esp_timer_get_time();
+      }
+      continue;
+    }
+    lastRequestUs = esp_timer_get_time();
     relay::Header h{};
     std::memcpy(&h, m.data, relay::HDR);
     if (h.magic0 != relay::MAGIC0 || h.magic1 != relay::MAGIC1 || h.version != relay::VERSION) continue;

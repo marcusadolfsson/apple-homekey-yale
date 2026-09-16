@@ -8,8 +8,15 @@
 #include "mbedtls/aes.h"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <string>
+
+// Set while the BLE link to the lock is being used. The C6 has a single 2.4 GHz
+// radio, so relay polling over ESP-NOW and a BLE connection attempt starve each
+// other: connecting took 9.5 s alongside 10 polls/s, against 1.9 s on a quiet
+// radio. RemoteNfcReader pauses polling while this is set.
+extern std::atomic<bool> g_bleRadioBusy;
 
 namespace espConfig { struct misc_config_t; }
 struct ble_gap_event;
@@ -59,7 +66,7 @@ public:
   /** Parse config and start the worker. No-op (logged) if disabled or invalid. */
   void begin();
 
-  enum class Cmd : uint8_t { Status, Unlock, Lock };
+  enum class Cmd : uint8_t { Status, Unlock, Lock, Prepare };
   void request(Cmd cmd);
 
 private:
@@ -137,6 +144,8 @@ private:
   uint8_t m_ownAddrType = 0;
   uint8_t m_peerAddrType = 0;
   uint16_t m_conn = 0xFFFF;  // written by host task on connect/disconnect
+  uint16_t m_connItvl = 0;   // negotiated interval, units of 1.25 ms
+  int64_t m_lastDisconnectUs = 0;
   uint16_t m_svcStart = 0, m_svcEnd = 0;
   uint16_t m_hWrite = 0, m_hRead = 0, m_hSecWrite = 0, m_hSecRead = 0;
   uint16_t m_hReadCccd = 0, m_hSecReadCccd = 0;
@@ -153,5 +162,6 @@ private:
   std::array<uint8_t, 16> m_ivEnc{}, m_ivDec{};
 
   AppEventLoop::SubscriptionHandle m_nfcSub;
+  AppEventLoop::SubscriptionHandle m_tagSub;
   AppEventLoop::SubscriptionHandle m_targetSub;
 };

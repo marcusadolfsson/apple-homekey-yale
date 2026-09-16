@@ -20,6 +20,7 @@
 #include <vector>
 
 YaleBleLock *YaleBleLock::s_instance = nullptr;
+std::atomic<bool> g_bleRadioBusy{false};
 
 namespace {
 
@@ -48,6 +49,7 @@ constexpr uint8_t STATUS_DOOR_AND_LOCK = 0x2F;
 
 constexpr uint32_t SCAN_MS = 30000;
 constexpr uint32_t CONNECT_MS = 10000;
+constexpr uint32_t DIRECT_CONNECT_MS = 4000;  // cached-address attempt
 constexpr uint32_t GATT_MS = 5000;
 constexpr uint32_t OP_RESULT_MS = 15000;
 // Match yalexs-ble's default (DISCONNECT_DELAY 5.1 s): the lock shares one radio
@@ -134,6 +136,7 @@ const char *cmdName(YaleBleLock::Cmd c) {
     case YaleBleLock::Cmd::Status: return "status";
     case YaleBleLock::Cmd::Unlock: return "unlock";
     case YaleBleLock::Cmd::Lock: return "lock";
+    case YaleBleLock::Cmd::Prepare: return "prepare";
   }
   return "?";
 }
@@ -193,6 +196,10 @@ void YaleBleLock::begin() {
       ESP_LOGW(TAG, "HomeKey tap ignored: enable 'Always Unlock' so a tap opens the Yale");
     }
   });
+  // NOTE: do not start the BLE session when a card is merely detected. Tried and
+  // reverted: one 2.4 GHz radio means a connect attempt running alongside the card
+  // exchange corrupted APDUs ("Auth0 response invalid") and pushed connect from
+  // 1.9 s to 15.8 s. The unlock request arrives ~300 ms later anyway.
   m_targetSub = AppEventLoop::subscribe(LOCK_EVENT, LOCK_TARGET_STATE_CHANGED, [this](const uint8_t *data, size_t size) {
     if (size == 0 || data == nullptr) return;
     std::error_code ec;
@@ -286,6 +293,7 @@ int YaleBleLock::gapEvent(ble_gap_event *event, void *arg) {
         self->m_scanMatched = true;
         ev.type = EvType::DiscFound;
         ev.addrType = a.type;
+        ev.status = event->disc.rssi;  // signal strength dominates connect time
         self->post(ev);
       }
       return 0;
@@ -304,8 +312,17 @@ int YaleBleLock::gapEvent(ble_gap_event *event, void *arg) {
       }
       self->post(ev);
       return 0;
+    case BLE_GAP_EVENT_CONN_UPDATE:
+    case BLE_GAP_EVENT_CONN_UPDATE_REQ: {
+      ble_gap_conn_desc desc{};
+      if (ble_gap_conn_find(self->m_conn, &desc) == 0) {
+        self->m_connItvl = desc.conn_itvl;  // units of 1.25 ms
+      }
+      return 0;
+    }
     case BLE_GAP_EVENT_DISCONNECT:
       self->m_conn = 0xFFFF;
+      self->m_lastDisconnectUs = esp_timer_get_time();
       ev.type = EvType::Disconnected;
       ev.status = event->disconnect.reason;
       self->post(ev);
@@ -470,7 +487,8 @@ void YaleBleLock::run() {
     Cmd cmd;
     if (xQueueReceive(m_commands, &cmd, 0) == pdTRUE) {
       int64_t now = esp_timer_get_time();
-      if (cmd != Cmd::Status && cmd == lastCmd && now - lastCmdUs < int64_t(DEDUPE_MS) * 1000) {
+      if (cmd != Cmd::Status && cmd != Cmd::Prepare && cmd == lastCmd &&
+          now - lastCmdUs < int64_t(DEDUPE_MS) * 1000) {
         ESP_LOGD(TAG, "coalescing duplicate %s request", cmdName(cmd));
         continue;
       }
@@ -510,6 +528,7 @@ void YaleBleLock::run() {
       }
       case EvType::Disconnected:
         m_sessionReady = false;
+        g_bleRadioBusy.store(false, std::memory_order_release);
         ESP_LOGI(TAG, "lock disconnected (reason 0x%x)", ev.status);
         break;
       default:
@@ -521,12 +540,21 @@ void YaleBleLock::run() {
 void YaleBleLock::performCommand(Cmd cmd) {
   ESP_LOGI(TAG, "%s requested", cmdName(cmd));
   const int64_t t0 = esp_timer_get_time();
+  g_bleRadioBusy.store(true, std::memory_order_release);
+  struct BusyGuard {
+    ~BusyGuard() { g_bleRadioBusy.store(false, std::memory_order_release); }
+  } busyGuard;
   if (!ensureConnected()) {
     ESP_LOGE(TAG, "%s failed: could not establish a session with the lock", cmdName(cmd));
     return;
   }
   Frame resp{};
   switch (cmd) {
+    case Cmd::Prepare:
+      // ensureConnected() above did the work; hold the session for the linger
+      // window so the unlock that usually follows needs no connect at all.
+      ESP_LOGI(TAG, "session prepared in %lld ms", (esp_timer_get_time() - t0) / 1000);
+      break;
     case Cmd::Status:
       if (sendCommand(OP_GETSTATUS, STATUS_LOCK_ONLY, 0xBB, OP_GETSTATUS, STATUS_LOCK_ONLY, GATT_MS, resp)) {
         ESP_LOGI(TAG, "status read in %lld ms", (esp_timer_get_time() - t0) / 1000);
@@ -555,12 +583,25 @@ bool YaleBleLock::ensureConnected() {
   if (m_conn != 0xFFFF && m_sessionReady) return true;
   if (m_conn != 0xFFFF) disconnect();
   const int64_t t0 = esp_timer_get_time();
-  bool connected = m_addrKnown && connectDirect();
-  if (!connected) {
-    // No cached address, or it did not answer: scan, and rediscover in case the
-    // lock was re-paired or its module replaced.
-    if (m_addrKnown) clearCache();
-    if (!scanAndConnect()) return false;
+  const bool justDisconnected =
+      m_lastDisconnectUs != 0 && esp_timer_get_time() - m_lastDisconnectUs < 10000000;
+  if (justDisconnected) ESP_LOGI(TAG, "recent session: scanning instead of a direct connect");
+  bool connected = m_addrKnown && !justDisconnected && connectDirect();
+  if (!connected && !scanAndConnect()) return false;
+  {
+    // The lock may negotiate a slow interval, which stretches every handshake
+    // round trip; ask for a fast one and report what we ended up with.
+    ble_gap_upd_params up{};
+    up.itvl_min = CONN_ITVL_MIN;
+    up.itvl_max = CONN_ITVL_MAX;
+    up.latency = 0;
+    up.supervision_timeout = SUPERVISION_TMO;
+    up.min_ce_len = 0;
+    up.max_ce_len = 0;
+    int urc = ble_gap_update_params(m_conn, &up);
+    ble_gap_conn_desc desc{};
+    if (ble_gap_conn_find(m_conn, &desc) == 0) m_connItvl = desc.conn_itvl;
+    ESP_LOGI(TAG, "connection interval %u ms (update rc=%d)", unsigned(m_connItvl * 5 / 4), urc);
   }
   if (!m_gattCached) {
     if (!discover()) { disconnect(); return false; }
@@ -583,9 +624,9 @@ bool YaleBleLock::connectDirect() {
   peer.type = m_peerAddrType;
   for (int i = 0; i < 6; ++i) peer.val[i] = m_mac[5 - i];
   const ble_gap_conn_params cp = connParams();
-  int rc = ble_gap_connect(m_ownAddrType, &peer, CONNECT_MS, &cp, gapEvent, this);
+  int rc = ble_gap_connect(m_ownAddrType, &peer, DIRECT_CONNECT_MS, &cp, gapEvent, this);
   Ev ev{};
-  if (rc != 0 || !waitFor(EvType::Connected, CONNECT_MS + 1000, ev)) {
+  if (rc != 0 || !waitFor(EvType::Connected, DIRECT_CONNECT_MS + 500, ev)) {
     if (rc == 0) ble_gap_conn_cancel();
     ESP_LOGW(TAG, "direct connect failed (rc=%d); falling back to scan", rc);
     return false;
@@ -619,7 +660,8 @@ bool YaleBleLock::scanAndConnect() {
   ble_gap_disc_cancel();
   m_peerAddrType = ev.addrType;
   m_addrKnown = true;
-  ESP_LOGI(TAG, "lock found after %lld ms (addr type %u)", (esp_timer_get_time() - t0) / 1000, m_peerAddrType);
+  ESP_LOGI(TAG, "lock found after %lld ms (rssi %d dBm, addr type %u)",
+           (esp_timer_get_time() - t0) / 1000, ev.status, m_peerAddrType);
 
   ble_addr_t peer{};
   peer.type = m_peerAddrType;

@@ -84,6 +84,7 @@ private:
   uint32_t m_pollsSent = 0, m_pollsAnswered = 0;
   bool m_readerReady = false;
   int64_t m_lastStatUs = 0;
+  int64_t m_lastHelloUs = 0;
 
   static constexpr const char *TAG = "RelayReader";
 };

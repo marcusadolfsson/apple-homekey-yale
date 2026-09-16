@@ -1,5 +1,7 @@
 #include "RemoteNfcReader.hpp"
 
+#include "YaleBleLock.hpp"
+
 #include "esp_log.h"
 #include "esp_now.h"
 #include "esp_timer.h"
@@ -62,6 +64,9 @@ bool RemoteNfcReader::init() {
   }
   esp_now_register_recv_cb(recvTrampoline);
   addPeer(BROADCAST);
+  // Leave WiFi power save at its default. Forcing WIFI_PS_NONE keeps the WiFi
+  // receiver on, which shares one radio with BLE and made connecting to the lock
+  // 3-4x slower (1.9 s -> 4.8-8.0 s) while saving only ~10 ms of relay latency.
   xTaskCreate(rxTaskEntry, "relay_rx", 4096, this, 6, &m_rxTask);
   m_started = true;
 
@@ -102,6 +107,17 @@ void RemoteNfcReader::rxTask() {
     std::memcpy(&h, m.data, relay::HDR);
     if (h.magic0 != relay::MAGIC0 || h.magic1 != relay::MAGIC1 || h.version != relay::VERSION) continue;
 
+    if (relay::Op(h.op) == relay::Op::Pong) {
+      addPeer(m.mac);
+      if (!m_doorbellKnown) {
+        std::memcpy(m_doorbell, m.mac, 6);
+        m_doorbellKnown = true;
+        m_readerReady = (h.flags & 2) != 0;
+        ESP_LOGI(TAG, "doorbell answered our hello: %02X:%02X:%02X:%02X:%02X:%02X", m_doorbell[0],
+                 m_doorbell[1], m_doorbell[2], m_doorbell[3], m_doorbell[4], m_doorbell[5]);
+      }
+      continue;
+    }
     if (relay::Op(h.op) == relay::Op::Ping) {
       // A doorbell is looking for a base: answer, and adopt the first one.
       addPeer(m.mac);
@@ -183,6 +199,21 @@ void RemoteNfcReader::endDiscovery() {}
 
 bool RemoteNfcReader::pollForTag(std::vector<uint8_t> &uid, std::array<uint8_t, 2> &atqa,
                                  uint8_t &sak, uint32_t timeoutMs) {
+  if (g_bleRadioBusy.load(std::memory_order_acquire)) {
+    // Give the radio to the lock connection; the card that triggered it has
+    // already been read.
+    vTaskDelay(pdMS_TO_TICKS(100));
+    return false;
+  }
+  if (!m_doorbellKnown) {
+    // The doorbell stops pinging once paired, so after a base restart nobody is
+    // looking for anybody. Advertise until a doorbell answers.
+    const int64_t now = esp_timer_get_time();
+    if (now - m_lastHelloUs > 3000000) {
+      m_lastHelloUs = now;
+      send(BROADCAST, relay::Op::Ping, ++m_seq, 0, nullptr, 0);
+    }
+  }
   uint8_t req[22];
   std::memcpy(req, m_ecpData.data(), 18);
   const uint32_t t = timeoutMs;
@@ -239,12 +270,14 @@ bool RemoteNfcReader::exchangeApdu(const std::vector<uint8_t> &send_, std::vecto
 }
 
 bool RemoteNfcReader::isTagStillPresent() {
+  if (g_bleRadioBusy.load(std::memory_order_acquire)) return false;
   Response rsp;
   if (!request(relay::Op::PresentReq, nullptr, 0, relay::Op::PresentRsp, 500, rsp)) return false;
   return rsp.flags != 0;
 }
 
 void RemoteNfcReader::releaseTag() {
+  if (g_bleRadioBusy.load(std::memory_order_acquire)) return;
   Response rsp;
   (void)request(relay::Op::ReleaseReq, nullptr, 0, relay::Op::ReleaseRsp, 500, rsp);
   if (m_apduCount) {
@@ -256,6 +289,8 @@ void RemoteNfcReader::releaseTag() {
 
 bool RemoteNfcReader::healthCheck() {
   if (!m_doorbellKnown) return true;  // nothing to check until a doorbell pairs
+  // Health polls are ESP-NOW traffic too: skip them while the lock link is up.
+  if (g_bleRadioBusy.load(std::memory_order_acquire)) return true;
   Response rsp;
   if (!request(relay::Op::HealthReq, nullptr, 0, relay::Op::HealthRsp, 500, rsp)) {
     ESP_LOGW(TAG, "doorbell did not answer a health check");
