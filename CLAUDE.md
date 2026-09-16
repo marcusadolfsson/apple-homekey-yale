@@ -249,11 +249,21 @@ which is *not encrypted* — enable flash encryption before deploying.
 2. **The base follows its AP's channel** and the AP roams; a tap in the ~30 s
    before the doorbell re-scans is lost. If that is common, add a send-failure
    callback on the doorbell so it re-scans in a second rather than thirty.
+   (The re-scan itself was dead code until 2026-09-16: it sat below the
+   `pollOnce(); continue;` in the main loop, so a polling doorbell never reached
+   it and stayed parked on a dead channel until power-cycled. Anything that must
+   run every loop goes *above* that `continue`.)
 3. **Taps are ignored while the BLE link holds the radio** (`g_bleRadioBusy`), by
    design — a concurrent connect corrupted the card exchange. With the lock out of
-   range that window used to be a 30 s scan; it is now 8 s (`SCAN_MS`), the base
-   *drops* announcements that arrive meanwhile instead of queueing them, and a
-   queued announcement older than 1.5 s is discarded. Before this, four stale
+   range that window used to be 4 s direct connect + 30 s scan. Now: the scan is
+   8 s (`SCAN_MS`) and **is skipped entirely while the address is cached** until
+   three direct connects fail in a row (`DIRECT_FAILURES_BEFORE_SCAN`) — a failed
+   direct connect with a known address means "out of range", and scanning only
+   held the radio to learn the same thing. Out of range the window is now ~4 s.
+   The base *drops* announcements that arrive meanwhile instead of queueing them,
+   and a queued announcement older than 1.5 s is discarded. The 5 s linger after
+   a command does **not** hold the radio (`BusyGuard` clears it on return), so a
+   second tap right after unlocking goes through. Before this, four stale
    taps were "detected" the instant a failed scan ended and each ran a 0-byte
    transaction against a phone that had left half a minute earlier. Symptom to
    recognise: "works on one tap, then nothing for a while, then a burst".

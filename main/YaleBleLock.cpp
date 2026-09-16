@@ -589,8 +589,20 @@ bool YaleBleLock::ensureConnected() {
   const bool justDisconnected =
       m_lastDisconnectUs != 0 && esp_timer_get_time() - m_lastDisconnectUs < 10000000;
   if (justDisconnected) ESP_LOGI(TAG, "recent session: scanning instead of a direct connect");
-  bool connected = m_addrKnown && !justDisconnected && connectDirect();
-  if (!connected && !scanAndConnect()) return false;
+  const bool tryDirect = m_addrKnown && !justDisconnected;
+  bool connected = tryDirect && connectDirect();
+  if (!connected) {
+    if (tryDirect) ++m_directFailures;
+    const bool scanWorthIt = !m_addrKnown || justDisconnected ||
+                             m_directFailures >= DIRECT_FAILURES_BEFORE_SCAN;
+    if (!scanWorthIt) {
+      ESP_LOGW(TAG, "direct connect failed (%d in a row); not scanning - lock is most likely out of range",
+               m_directFailures);
+      return false;
+    }
+    if (!scanAndConnect()) return false;
+  }
+  m_directFailures = 0;
   {
     // The lock may negotiate a slow interval, which stretches every handshake
     // round trip; ask for a fast one and report what we ended up with.

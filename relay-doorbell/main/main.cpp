@@ -591,6 +591,17 @@ extern "C" void app_main() {
         appendBattery(hb);
         send(g_base, relay::Op::HealthRsp, 0, g_pn532Ready ? 2 : 0, hb.data(), hb.size());
       }
+      // Silence means the base restarted or its AP moved channel. This has to
+      // run before the poll-and-continue below, or a polling doorbell never
+      // notices and stays parked on a dead channel until it is power-cycled.
+      // Heartbeats are not replies, so with nothing else on the wire this
+      // fires ~30 s after the base goes quiet.
+      if (g_baseKnown && esp_timer_get_time() - lastRequestUs > 30000000) {
+        ESP_LOGW(TAG, "no word from the base for 30 s; searching for it again");
+        g_baseKnown = false;
+        findBase();
+        lastRequestUs = esp_timer_get_time();
+      }
       if (g_haveEcp && !g_tagActive) {
         pollOnce();
         continue;
@@ -614,12 +625,6 @@ extern "C" void app_main() {
         ESP_LOGW(TAG, "no APDUs after announcing a tag; resuming polling");
         (void)g_pn532->InRelease(1);
         g_tagActive = false;
-      }
-      if (g_baseKnown && esp_timer_get_time() - lastRequestUs > 30000000) {
-        ESP_LOGW(TAG, "no requests for 30 s; searching for a base again");
-        g_baseKnown = false;
-        findBase();
-        lastRequestUs = esp_timer_get_time();
       }
       continue;
     }

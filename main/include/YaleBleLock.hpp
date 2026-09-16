@@ -104,6 +104,13 @@ private:
   void performCommand(Cmd cmd);
   void disconnect();
   void loadCache();
+  // Consecutive failed direct (cached-address) connects. With the address known,
+  // a failed direct connect almost always means "out of range", and an 8 s scan
+  // then just holds the shared radio (dropping taps) to learn the same thing.
+  // Scan only when the address is unknown or after this many direct failures,
+  // in case the lock's address really did change.
+  int m_directFailures = 0;
+  static constexpr int DIRECT_FAILURES_BEFORE_SCAN = 3;
   void saveCache();
   void clearCache();
   bool waitFor(EvType type, uint32_t timeoutMs, Ev &out);
