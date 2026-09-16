@@ -17,6 +17,9 @@
 // other: connecting took 9.5 s alongside 10 polls/s, against 1.9 s on a quiet
 // radio. RemoteNfcReader pauses polling while this is set.
 extern std::atomic<bool> g_bleRadioBusy;
+// Set only while a connect or scan is in flight: the phase a tap may abort.
+// The handshake/command phase that follows is ~100 ms and is left alone.
+extern std::atomic<bool> g_bleLinkAttempt;
 
 namespace espConfig { struct misc_config_t; }
 struct ble_gap_event;
@@ -69,6 +72,10 @@ public:
   enum class Cmd : uint8_t { Status, Unlock, Lock, Prepare };
   void request(Cmd cmd);
 
+  /** Cancel an in-flight connect or scan so a tap can use the radio. A person at
+   *  the door outranks a link attempt, and the tap's own unlock restarts it. */
+  static void abortLinkAttempt();
+
 private:
   static constexpr const char *TAG = "YaleBle";
   static constexpr size_t FRAME_LEN = 18;
@@ -110,6 +117,7 @@ private:
   // Scan only when the address is unknown or after this many direct failures,
   // in case the lock's address really did change.
   int m_directFailures = 0;
+  bool m_attemptAborted = false;  // set by abortLinkAttempt(); not a real failure
   static constexpr int DIRECT_FAILURES_BEFORE_SCAN = 3;
   void saveCache();
   void clearCache();

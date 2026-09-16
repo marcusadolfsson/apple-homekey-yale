@@ -275,9 +275,16 @@ which is *not encrypted* — enable flash encryption before deploying.
    `pollOnce(); continue;` in the main loop, so a polling doorbell never reached
    it and stayed parked on a dead channel until power-cycled. Anything that must
    run every loop goes *above* that `continue`.)
-3. **Taps are ignored while the BLE link holds the radio** (`g_bleRadioBusy`), by
-   design — a concurrent connect corrupted the card exchange. With the lock out of
-   range that window used to be 4 s direct connect + 30 s scan. Now: the scan is
+3. **A tap pre-empts an in-flight BLE connect or scan.** Running the card exchange
+   *concurrently* with a connect corrupted it, so the two never overlap — but a
+   person at the door outranks a link attempt, and the tap's own unlock restarts
+   it (a 0.3–0.7 s reconnect at the door). While `g_bleLinkAttempt` is set, a tag
+   announcement calls `YaleBleLock::abortLinkAttempt()` (`ble_gap_conn_cancel` +
+   `ble_gap_disc_cancel`; the worker sees `ConnectFailed`/`DiscDone`, and
+   `waitFor()` returns on those rather than running out the clock). An abort is
+   not counted as a failure. Only the ~100 ms handshake/ack phase still drops a
+   tap. History of that window: it used to be 4 s direct connect + 30 s scan,
+   during which announcements were *queued*, then acted on late. Now: the scan is
    8 s (`SCAN_MS`) and **is skipped entirely while the address is cached** until
    three direct connects fail in a row (`DIRECT_FAILURES_BEFORE_SCAN`) — a failed
    direct connect with a known address means "out of range", and scanning only

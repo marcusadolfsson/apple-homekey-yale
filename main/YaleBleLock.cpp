@@ -21,6 +21,7 @@
 
 YaleBleLock *YaleBleLock::s_instance = nullptr;
 std::atomic<bool> g_bleRadioBusy{false};
+std::atomic<bool> g_bleLinkAttempt{false};
 
 namespace {
 
@@ -215,6 +216,13 @@ void YaleBleLock::begin() {
 
   loadCache();
   xTaskCreate(taskEntry, "yale_ble", 6144, this, 5, &m_task);
+}
+
+void YaleBleLock::abortLinkAttempt() {
+  if (!g_bleLinkAttempt.load(std::memory_order_acquire)) return;
+  if (s_instance) s_instance->m_attemptAborted = true;
+  ble_gap_conn_cancel();  // BLE_HS_EALREADY when nothing is connecting: harmless
+  ble_gap_disc_cancel();
 }
 
 void YaleBleLock::request(Cmd cmd) {
@@ -424,6 +432,12 @@ bool YaleBleLock::waitFor(EvType type, uint32_t timeoutMs, Ev &out) {
       out = ev;
       return true;
     }
+    // A cancelled connect surfaces as ConnectFailed, a cancelled scan as
+    // DiscDone. Waiting on for the timeout after either would defeat the abort.
+    if ((type == EvType::Connected && ev.type == EvType::ConnectFailed) ||
+        (type == EvType::DiscFound && ev.type == EvType::DiscDone)) {
+      return false;
+    }
     switch (ev.type) {
       case EvType::Command:
         // Defer; handled once the current operation finishes.
@@ -599,7 +613,12 @@ bool YaleBleLock::ensureConnected() {
   // A direct connect waits for that advertisement exactly as a scan would, so
   // there is no reason to scan here: just allow it more time.
   const bool tryDirect = m_addrKnown;
+  m_attemptAborted = false;
   bool connected = tryDirect && connectDirect(justDisconnected ? CONNECT_MS : DIRECT_CONNECT_MS);
+  if (!connected && m_attemptAborted) {
+    ESP_LOGI(TAG, "link attempt aborted for a tap; its unlock will start a new one");
+    return false;
+  }
   if (!connected) {
     if (tryDirect) ++m_directFailures;
     const bool scanWorthIt = !m_addrKnown ||
@@ -609,7 +628,10 @@ bool YaleBleLock::ensureConnected() {
                m_directFailures);
       return false;
     }
-    if (!scanAndConnect()) return false;
+    if (!scanAndConnect()) {
+      if (m_attemptAborted) ESP_LOGI(TAG, "scan aborted for a tap; its unlock will start a new one");
+      return false;
+    }
   }
   m_directFailures = 0;
   {
@@ -644,6 +666,8 @@ bool YaleBleLock::ensureConnected() {
 
 bool YaleBleLock::connectDirect(uint32_t timeoutMs) {
   const int64_t t0 = esp_timer_get_time();
+  struct AttemptGuard { AttemptGuard() { g_bleLinkAttempt.store(true, std::memory_order_release); }
+                        ~AttemptGuard() { g_bleLinkAttempt.store(false, std::memory_order_release); } } attempt;
   ble_addr_t peer{};
   peer.type = m_peerAddrType;
   for (int i = 0; i < 6; ++i) peer.val[i] = m_mac[5 - i];
@@ -652,7 +676,7 @@ bool YaleBleLock::connectDirect(uint32_t timeoutMs) {
   Ev ev{};
   if (rc != 0 || !waitFor(EvType::Connected, timeoutMs + 500, ev)) {
     if (rc == 0) ble_gap_conn_cancel();
-    ESP_LOGW(TAG, "direct connect failed (rc=%d) after %u ms", rc, unsigned(timeoutMs));
+    if (!m_attemptAborted) ESP_LOGW(TAG, "direct connect failed (rc=%d) after %u ms", rc, unsigned(timeoutMs));
     return false;
   }
   ESP_LOGI(TAG, "connected directly in %lld ms", (esp_timer_get_time() - t0) / 1000);
@@ -661,6 +685,8 @@ bool YaleBleLock::connectDirect(uint32_t timeoutMs) {
 
 bool YaleBleLock::scanAndConnect() {
   const int64_t t0 = esp_timer_get_time();
+  struct AttemptGuard { AttemptGuard() { g_bleLinkAttempt.store(true, std::memory_order_release); }
+                        ~AttemptGuard() { g_bleLinkAttempt.store(false, std::memory_order_release); } } attempt;
   ble_gap_disc_params dp{};
   dp.filter_duplicates = 0;  // keep reporting while the diagnostics run
   dp.passive = 0;            // active: the local name usually arrives in the scan response

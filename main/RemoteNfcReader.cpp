@@ -269,13 +269,23 @@ void RemoteNfcReader::rxTask() {
       // meant that, the moment BLE let go, the base "detected" a phone that had
       // left 30 s earlier and ran a 0-byte transaction for each queued repeat.
       if (g_bleRadioBusy.load(std::memory_order_acquire)) {
-        const int64_t now = esp_timer_get_time();
-        if (now - m_lastBusyDropLogUs > 5000000) {
-          m_lastBusyDropLogUs = now;
-          ESP_LOGW(TAG, "tap announced while the lock link holds the radio; ignored");
+        if (g_bleLinkAttempt.load(std::memory_order_acquire)) {
+          // A connect or scan is in flight. The person at the door outranks it:
+          // cancel it and let the tap through. The busy flag clears within a
+          // few ms once the worker sees the cancel, well inside the 1.5 s the
+          // queued announcement stays valid. The tap's own unlock reconnects.
+          ESP_LOGI(TAG, "tap during a lock link attempt; aborting the attempt for it");
+          YaleBleLock::abortLinkAttempt();
+        } else {
+          // Handshake or command in progress: ~100 ms, not worth interrupting.
+          const int64_t now = esp_timer_get_time();
+          if (now - m_lastBusyDropLogUs > 5000000) {
+            m_lastBusyDropLogUs = now;
+            ESP_LOGW(TAG, "tap announced during the lock handshake; ignored");
+          }
+          delete r;
+          continue;
         }
-        delete r;
-        continue;
       }
     }
     QueueHandle_t q = tagEvent ? m_tagEvents : m_responses;
