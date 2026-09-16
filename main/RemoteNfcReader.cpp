@@ -226,6 +226,10 @@ void RemoteNfcReader::rxTask() {
     if (relay::Op(h.op) == relay::Op::HealthRsp) {
       m_readerReady = (h.flags & 2) != 0;  // heartbeat
       noteBattery(m.data + relay::HDR, m.len - relay::HDR);
+      // Acknowledge it. The doorbell re-scans for us after 30 s without hearing
+      // from us, and between taps this is the only frame we would ever send, so
+      // without the ack an idle doorbell "loses" the base every 30 s.
+      send(m.mac, relay::Op::Pong, h.seq, 0, nullptr, 0);
       continue;
     }
     if (relay::Op(h.op) == relay::Op::ButtonPress) {

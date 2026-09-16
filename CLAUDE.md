@@ -62,6 +62,11 @@ single device with hourly check-ins.
 Over half of what remains is the lock itself. Idle current target for a battery
 doorbell is ~20–30 µA (ST25R3916 wake-up mode ~3 µA + C6 deep sleep 7 µA + regulator).
 
+**Two Express taps 5 s apart (2026-09-16, at the door):** first tap authenticated
+in 185 ms, `connected directly in 342 ms`, **unlock succeeded in 2798 ms**; second
+tap authenticated in 189 ms and rode the lingering session — **unlock succeeded in
+437 ms**, no connect at all. Cold ≈ 3 s, warm ≈ 0.6 s, no drops.
+
 **Range dominates everything.** The same firmware, with Home Assistant out of the
 picture entirely: next to the lock, connect 722 ms and unlock 2.9 s; well away from
 it, the cached-address connect fails outright, a scan takes 2.6 s and the unlock
@@ -145,7 +150,11 @@ in the clear because ESP-NOW cannot encrypt broadcast.
   bit in its flags; the base tracks it continuously.
 - `ApduReq/Rsp`, `PresentReq/Rsp`, `ReleaseReq/Rsp` — the transaction itself.
 - `HealthRsp` — unsolicited heartbeat every 30 s; liveness is inferred from traffic
-  received rather than polled for (`HEARTBEAT_TIMEOUT_MS`).
+  received rather than polled for (`HEARTBEAT_TIMEOUT_MS`). **The base answers it
+  with a `Pong`.** Between taps that ack is the only frame the base ever sends, and
+  the doorbell re-scans for the base after 30 s without hearing from it — without
+  the ack an idle doorbell "lost" the base every 30 s and swept the channels for
+  nothing. Verified: no re-scan across several idle minutes once acked.
 - `ButtonPress` — the doorbell button.
 
 **Tap announcements have their own queue** on the base. Sharing one queue with
