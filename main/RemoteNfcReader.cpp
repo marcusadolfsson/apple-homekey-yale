@@ -257,7 +257,24 @@ void RemoteNfcReader::rxTask() {
     }
 
     auto *r = new Response{h.op, h.seq, h.flags, std::move(payload)};
-    QueueHandle_t q = relay::Op(h.op) == relay::Op::TagEvent ? m_tagEvents : m_responses;
+    const bool tagEvent = relay::Op(h.op) == relay::Op::TagEvent;
+    if (tagEvent) {
+      r->receivedUs = esp_timer_get_time();
+      // While the BLE link holds the radio the card exchange cannot run (a
+      // concurrent connect corrupted APDUs). Queueing the announcement instead
+      // meant that, the moment BLE let go, the base "detected" a phone that had
+      // left 30 s earlier and ran a 0-byte transaction for each queued repeat.
+      if (g_bleRadioBusy.load(std::memory_order_acquire)) {
+        const int64_t now = esp_timer_get_time();
+        if (now - m_lastBusyDropLogUs > 5000000) {
+          m_lastBusyDropLogUs = now;
+          ESP_LOGW(TAG, "tap announced while the lock link holds the radio; ignored");
+        }
+        delete r;
+        continue;
+      }
+    }
+    QueueHandle_t q = tagEvent ? m_tagEvents : m_responses;
     if (xQueueSend(q, &r, 0) != pdTRUE) delete r;  // nobody waiting
   }
 }
@@ -317,6 +334,12 @@ bool RemoteNfcReader::pollForTag(std::vector<uint8_t> &uid, std::array<uint8_t, 
     // so the base sends nothing at all between taps.
     Response *r = nullptr;
     if (xQueueReceive(m_tagEvents, &r, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) return false;
+    if (esp_timer_get_time() - r->receivedUs > TAG_EVENT_MAX_AGE_US) {
+      ESP_LOGW(TAG, "dropping a stale tap announcement (%lld ms old)",
+               (esp_timer_get_time() - r->receivedUs) / 1000);
+      delete r;
+      return false;
+    }
     const std::vector<uint8_t> p = std::move(r->payload);
     delete r;
     if (p.empty() || p.size() < size_t(1 + p[0] + 3)) return false;

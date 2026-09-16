@@ -69,7 +69,13 @@ private:
   struct Response {
     uint8_t op = 0, seq = 0, flags = 0;
     std::vector<uint8_t> payload;
+    int64_t receivedUs = 0;  // tag events: so a stale one is never acted on (last: aggregate init)
   };
+  // A tag announcement older than this describes a phone that has left. The
+  // doorbell repeats the announcement for ~1 s, so anything beyond that is a
+  // leftover from a period the radio was busy.
+  static constexpr int64_t TAG_EVENT_MAX_AGE_US = 1500000;
+  int64_t m_lastBusyDropLogUs = 0;
 
   static void recvTrampoline(const esp_now_recv_info_t *info, const uint8_t *data, int len);
   static void rxTaskEntry(void *arg);

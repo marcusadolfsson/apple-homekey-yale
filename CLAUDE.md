@@ -249,7 +249,15 @@ which is *not encrypted* — enable flash encryption before deploying.
 2. **The base follows its AP's channel** and the AP roams; a tap in the ~30 s
    before the doorbell re-scans is lost. If that is common, add a send-failure
    callback on the doorbell so it re-scans in a second rather than thirty.
-3. **Lock sharing.** The lock accepts very few simultaneous BLE connections, and
+3. **Taps are ignored while the BLE link holds the radio** (`g_bleRadioBusy`), by
+   design — a concurrent connect corrupted the card exchange. With the lock out of
+   range that window used to be a 30 s scan; it is now 8 s (`SCAN_MS`), the base
+   *drops* announcements that arrive meanwhile instead of queueing them, and a
+   queued announcement older than 1.5 s is discarded. Before this, four stale
+   taps were "detected" the instant a failed scan ended and each ran a 0-byte
+   transaction against a phone that had left half a minute earlier. Symptom to
+   recognise: "works on one tap, then nothing for a while, then a burst".
+4. **Lock sharing.** The lock accepts very few simultaneous BLE connections, and
    Home Assistant connects to refresh state after each unlock. At normal tap spacing
    and range this costs at most a retry; if collisions appear in daily use, the fix
    is for HA to take front-door state from this reader over MQTT and stop connecting
@@ -258,19 +266,19 @@ which is *not encrypted* — enable flash encryption before deploying.
    at once, and unlocks cannot be attributed to a person. The reader should get its
    own slot — create a dedicated account, invite it to the lock, open the lock with
    it once over Bluetooth in person so the key is *loaded*, then extract key and slot.
-4. **Relay round trips run 28–160 ms**, above ESP-NOW's usual 5–15 ms; the largest
+5. **Relay round trips run 28–160 ms**, above ESP-NOW's usual 5–15 ms; the largest
    is the iPhone's own crypto rather than the link. Against a directly attached
    reader the relay adds ~40 ms to a whole transaction, so this is low priority.
-5. **Still to do for a battery doorbell:** ST25R3916 in place of the PN532 (its
+6. **Still to do for a battery doorbell:** ST25R3916 in place of the PN532 (its
    low-power card detection is the ~3 µA that makes idling possible), deep sleep
    between taps with wake on the reader's IRQ and on the button, and a measurement
    with a Nordic PPK2 rather than an estimate.
-6. Diagnostics still compiled in: I2C bus scan, BLE scan reports, relay statistics,
+7. Diagnostics still compiled in: I2C bus scan, BLE scan reports, relay statistics,
    the doorbell's poll-cycle rate (every 1000 cycles) and the ECP frame on push.
-7. **Web UI authentication is off by default**; turn it on before leaving a device
+8. **Web UI authentication is off by default**; turn it on before leaving a device
    running. Also enable flash encryption — the lock's offline key and the relay
    link key sit in plain NVS.
-8. The doorbell's USB console goes quiet after a reset until the port re-enumerates;
+9. The doorbell's USB console goes quiet after a reset until the port re-enumerates;
    reopen the port rather than assuming the board has crashed. Unplugging USB also
    kills any serial capture that was attached.
 

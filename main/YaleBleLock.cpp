@@ -47,7 +47,10 @@ constexpr uint8_t OP_LOCK = 0x0B;
 constexpr uint8_t STATUS_LOCK_ONLY = 0x02;
 constexpr uint8_t STATUS_DOOR_AND_LOCK = 0x2F;
 
-constexpr uint32_t SCAN_MS = 30000;
+// A scan holds the shared radio, and the relay reader drops tag announcements
+// while it runs: with the lock out of range a 30 s scan blinded the doorbell
+// for half a minute after every tap. In range the lock is found in ~2.6 s.
+constexpr uint32_t SCAN_MS = 8000;
 constexpr uint32_t CONNECT_MS = 10000;
 constexpr uint32_t DIRECT_CONNECT_MS = 4000;  // cached-address attempt
 constexpr uint32_t GATT_MS = 5000;
