@@ -18,6 +18,7 @@ const char *opName(Op op) {
     case Op::EcpReq: return "ecp-req";
     case Op::EcpSet: return "ecp-set";
     case Op::TagEvent: return "tag-event";
+    case Op::ButtonPress: return "button";
   }
   return "?";
 }

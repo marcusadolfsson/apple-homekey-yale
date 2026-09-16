@@ -32,7 +32,8 @@ enum class Op : uint8_t {
   // which is what lets the doorbell sleep on battery.
   EcpReq = 13,    // doorbell -> base: I have no ECP data, send it
   EcpSet = 14,    // base -> doorbell: 18-byte ECP frame + poll interval (ms, u16)
-  TagEvent = 15,  // doorbell -> base: unsolicited; a card is in the field
+  TagEvent = 15,     // doorbell -> base: unsolicited; a card is in the field
+  ButtonPress = 16,  // doorbell -> base: someone pressed the doorbell button
 };
 
 struct __attribute__((packed)) Header {

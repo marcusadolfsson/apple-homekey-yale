@@ -13,6 +13,7 @@ export type SystemInfo = {
   relay_paired?: boolean,
   relay_rssi?: number,
   relay_reader_ready?: boolean,
+  relay_battery_mv?: number,
   mqtt_connected: boolean,
   mqtt_error_code: number,
   mqtt_error_message?: string,
@@ -34,6 +35,7 @@ export const systemInfo : SystemInfo = $state({
   relay_paired: false,
   relay_rssi: 0,
   relay_reader_ready: false,
+  relay_battery_mv: 0,
   mqtt_connected: false,
   mqtt_error_code: 0,
   backlog_max_size: 0

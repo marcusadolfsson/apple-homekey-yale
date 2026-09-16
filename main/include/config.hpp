@@ -104,6 +104,8 @@ namespace espConfig
       lockCustomStateCmd.append(id).append("/" MQTT_CUSTOM_STATE_CTRL_TOPIC);
       btrLvlCmdTopic.append(id).append("/" MQTT_PROX_BAT_TOPIC);
       hkAltActionTopic.append(id).append("/" MQTT_HK_ALT_ACTION_TOPIC);
+      doorbellTopic.append(id).append("/" MQTT_DOORBELL_TOPIC);
+      doorbellBatteryTopic.append(id).append("/" MQTT_DOORBELL_BATTERY_TOPIC);
     };
     /* MQTT Broker */
     std::string mqttBroker = MQTT_HOST;
@@ -120,6 +122,8 @@ namespace espConfig
     std::string lockTStateCmd;
     std::string btrLvlCmdTopic;
     std::string hkAltActionTopic;
+    std::string doorbellTopic;
+    std::string doorbellBatteryTopic;
     /* MQTT Custom State */
     std::string lockCustomStateTopic;
     std::string lockCustomStateCmd;

@@ -1,6 +1,9 @@
 #include "RemoteNfcReader.hpp"
 
 #include "YaleBleLock.hpp"
+#include "app_event_loop.hpp"
+#include "app_events.hpp"
+#include "eventStructs.hpp"
 
 #include "esp_log.h"
 #include "esp_now.h"
@@ -9,6 +12,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
 
 RemoteNfcReader *RemoteNfcReader::s_instance = nullptr;
 
@@ -138,6 +142,17 @@ void RemoteNfcReader::rxTask() {
       continue;
     }
 
+    if (relay::Op(h.op) == relay::Op::HealthRsp) {
+      m_readerReady = (h.flags & 2) != 0;  // heartbeat
+      noteBattery(m.data + relay::HDR, m.len - relay::HDR);
+      continue;
+    }
+    if (relay::Op(h.op) == relay::Op::ButtonPress) {
+      noteBattery(m.data + relay::HDR, m.len - relay::HDR);
+      ESP_LOGI(TAG, "doorbell button pressed");
+      AppEventLoop::publish(HW_EVENT, HW_DOORBELL_BUTTON, nullptr, 0);
+      continue;
+    }
     if (relay::Op(h.op) == relay::Op::EcpReq) {
       ESP_LOGI(TAG, "doorbell asked for ECP data");
       sendEcp();
@@ -224,6 +239,7 @@ bool RemoteNfcReader::pollForTag(std::vector<uint8_t> &uid, std::array<uint8_t, 
     const std::vector<uint8_t> p = std::move(r->payload);
     delete r;
     if (p.empty() || p.size() < size_t(1 + p[0] + 3)) return false;
+    if (p.size() >= size_t(1 + p[0] + 3) + 2) noteBattery(p.data(), p.size());
     uid.assign(p.begin() + 1, p.begin() + 1 + p[0]);
     atqa[0] = p[1 + p[0]];
     atqa[1] = p[2 + p[0]];
@@ -242,6 +258,27 @@ bool RemoteNfcReader::pollForTag(std::vector<uint8_t> &uid, std::array<uint8_t, 
   }
   vTaskDelay(pdMS_TO_TICKS(200));
   return false;
+}
+
+// Battery voltage rides on the tail of frames the doorbell already sends, so a
+// sleepy doorbell reports every time it wakes and never transmits just for this.
+void RemoteNfcReader::noteBattery(const uint8_t *tail, size_t len) {
+  if (len < 2) return;
+  const uint16_t mv = uint16_t(tail[len - 2]) | uint16_t(tail[len - 1]) << 8;
+  if (mv == 0 || mv > 6000) return;  // 0 = no divider fitted
+  const bool firstReport = m_batteryMv == 0;
+  const bool moved = m_batteryMv && (mv > m_batteryMv + 50 || mv + 50 < m_batteryMv);
+  m_batteryMv = mv;
+  if (firstReport || moved) {
+    ESP_LOGI(TAG, "doorbell battery %u mV", mv);
+    // EventValueChanged carries bytes, so millivolts travel in its string field.
+    EventValueChanged ev{};
+    ev.name = "doorbellBatteryMv";
+    ev.str = std::to_string(mv);
+    std::array<uint8_t, 64> d{};
+    size_t n = alpaca::serialize(ev, d);
+    AppEventLoop::publish(HW_EVENT, HW_DOORBELL_BATTERY, d.data(), n);
+  }
 }
 
 void RemoteNfcReader::sendEcp() {

@@ -51,10 +51,11 @@ public:
   }
 
   /** Link status for the web UI: is a doorbell paired, how strong is the link. */
-  struct LinkStatus { bool paired; int8_t rssi; bool readerReady; };
+  struct LinkStatus { bool paired; int8_t rssi; bool readerReady; uint16_t batteryMv; };
   static LinkStatus linkStatus() {
-    if (!s_instance) return {false, 0, false};
-    return {s_instance->m_doorbellKnown, s_instance->m_linkRssi, s_instance->m_readerReady};
+    if (!s_instance) return {false, 0, false, 0};
+    return {s_instance->m_doorbellKnown, s_instance->m_linkRssi, s_instance->m_readerReady,
+            s_instance->m_batteryMv};
   }
 
 private:
@@ -99,6 +100,8 @@ private:
   uint32_t m_pollsSent = 0, m_pollsAnswered = 0;
   bool m_readerReady = false;
   int8_t m_linkRssi = 0;  // of the last frame heard from the doorbell
+  uint16_t m_batteryMv = 0;  // 0 = unknown (no divider fitted / USB powered)
+  void noteBattery(const uint8_t *tail, size_t len);
   static constexpr uint16_t POLL_INTERVAL_MS = 100;
   static constexpr int64_t HEARTBEAT_TIMEOUT_MS = 90000;
   int64_t m_lastHeardUs = 0;

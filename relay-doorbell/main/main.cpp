@@ -8,6 +8,10 @@
 #include "RelayProtocol.hpp"
 #include "pn532_cxx/pn532.hpp"
 
+#include "driver/gpio.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include "esp_adc/adc_oneshot.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_now.h"
@@ -27,6 +31,18 @@ namespace {
 const char *TAG = "doorbell";
 constexpr gpio_num_t PIN_SDA = GPIO_NUM_22;  // XIAO D4
 constexpr gpio_num_t PIN_SCL = GPIO_NUM_23;  // XIAO D5
+// Doorbell button: wire it between D0 and GND. GPIO0-7 are the C6's low-power
+// pins, so in a battery build this same pin wakes the chip from deep sleep
+// (esp_sleep_enable_ext1_wakeup) and a press costs one radio frame. D1/D2 stay
+// free for the ST25R3916's interrupt line.
+// D1 for the button: D0 doubles as A0, where Seeed's battery divider lands.
+constexpr gpio_num_t PIN_BUTTON = GPIO_NUM_1;  // XIAO D1
+// Battery sense on A0/D0 through a 1:2 divider (1M + 1M keeps the idle draw
+// near 2 uA; Seeed's suggested 200k pair would waste ~10 uA, half our budget).
+constexpr adc_channel_t BATTERY_CHANNEL = ADC_CHANNEL_0;  // GPIO0 on the C6
+constexpr int BATTERY_DIVIDER = 2;
+constexpr int64_t BUTTON_DEBOUNCE_US = 50000;
+constexpr int64_t BUTTON_REPEAT_US = 1000000;  // ignore chatter/held button
 const uint8_t BROADCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 struct Msg {
@@ -54,6 +70,56 @@ bool g_tagActive = false;       // a card is being worked on; stop polling
 int64_t g_tagActiveUs = 0;
 int64_t g_lastEcpReqUs = 0;
 int64_t g_lastHeartbeatUs = 0;
+int g_buttonLast = 1;  // pulled up: 1 = released
+int64_t g_buttonChangedUs = 0;
+int64_t g_lastPressUs = 0;
+adc_oneshot_unit_handle_t g_adc = nullptr;
+adc_cali_handle_t g_adcCali = nullptr;
+
+// Battery voltage in millivolts, or 0 when no divider is fitted (USB builds).
+uint16_t readBatteryMv() {
+  if (!g_adc) return 0;
+  int sum = 0, n = 0;
+  for (int i = 0; i < 8; ++i) {
+    int raw = 0;
+    if (adc_oneshot_read(g_adc, BATTERY_CHANNEL, &raw) != ESP_OK) continue;
+    sum += raw;
+    ++n;
+  }
+  if (!n) return 0;
+  int mv = 0;
+  if (g_adcCali) {
+    if (adc_cali_raw_to_voltage(g_adcCali, sum / n, &mv) != ESP_OK) return 0;
+  } else {
+    mv = (sum / n) * 3300 / 4095;  // uncalibrated fallback
+  }
+  const int battery = mv * BATTERY_DIVIDER;
+  // Below ~1 V there is no divider connected, just a floating pin.
+  return battery < 1000 ? 0 : uint16_t(battery);
+}
+
+void batteryInit() {
+  adc_oneshot_unit_init_cfg_t unit{};
+  unit.unit_id = ADC_UNIT_1;
+  if (adc_oneshot_new_unit(&unit, &g_adc) != ESP_OK) { g_adc = nullptr; return; }
+  adc_oneshot_chan_cfg_t chan{};
+  chan.bitwidth = ADC_BITWIDTH_DEFAULT;
+  chan.atten = ADC_ATTEN_DB_12;  // full 0-3.3 V span
+  adc_oneshot_config_channel(g_adc, BATTERY_CHANNEL, &chan);
+  adc_cali_curve_fitting_config_t cali{};
+  cali.unit_id = ADC_UNIT_1;
+  cali.chan = BATTERY_CHANNEL;
+  cali.atten = ADC_ATTEN_DB_12;
+  cali.bitwidth = ADC_BITWIDTH_DEFAULT;
+  if (adc_cali_create_scheme_curve_fitting(&cali, &g_adcCali) != ESP_OK) g_adcCali = nullptr;
+}
+
+// Two bytes of battery voltage ride along on frames we were sending anyway.
+void appendBattery(std::vector<uint8_t> &out) {
+  const uint16_t mv = readBatteryMv();
+  out.push_back(uint8_t(mv & 0xFF));
+  out.push_back(uint8_t(mv >> 8));
+}
 
 // Reassembly for the one request in flight; the base is strictly request/response.
 struct {
@@ -144,10 +210,34 @@ void pollOnce() {
   out.push_back(atqa[0]);
   out.push_back(atqa[1]);
   out.push_back(sak);
+  appendBattery(out);
   g_tagActive = true;  // hold the card; the base will drive APDUs now
   g_tagActiveUs = esp_timer_get_time();
   send(g_base, relay::Op::TagEvent, 0, 3, out.data(), out.size());
   ESP_LOGI(TAG, "tag detected, announced to base");
+}
+
+// Debounced press detection. Polled here because this test build stays awake;
+// a battery build would let the pin wake the chip instead.
+void checkButton() {
+  const int level = gpio_get_level(PIN_BUTTON);
+  const int64_t now = esp_timer_get_time();
+  if (level != g_buttonLast) {
+    g_buttonLast = level;
+    g_buttonChangedUs = now;
+    return;
+  }
+  if (level != 0 || now - g_buttonChangedUs < BUTTON_DEBOUNCE_US) return;
+  if (now - g_lastPressUs < BUTTON_REPEAT_US) return;
+  g_lastPressUs = now;
+  if (!g_baseKnown) {
+    ESP_LOGW(TAG, "button pressed but no base is paired");
+    return;
+  }
+  ESP_LOGI(TAG, "button pressed; telling the base");
+  std::vector<uint8_t> payload;
+  appendBattery(payload);
+  send(g_base, relay::Op::ButtonPress, 0, 0, payload.data(), payload.size());
 }
 
 void handlePoll(const Msg &m, const relay::Header &h, const std::vector<uint8_t> &payload) {
@@ -312,6 +402,19 @@ extern "C" void app_main() {
   esp_wifi_get_mac(WIFI_IF_STA, mac);
   ESP_LOGI(TAG, "doorbell MAC %02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
+  gpio_config_t btn{};
+  btn.pin_bit_mask = 1ULL << PIN_BUTTON;
+  btn.mode = GPIO_MODE_INPUT;
+  btn.pull_up_en = GPIO_PULLUP_ENABLE;  // button shorts to GND when pressed
+  btn.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  btn.intr_type = GPIO_INTR_DISABLE;
+  gpio_config(&btn);
+  ESP_LOGI(TAG, "doorbell button on GPIO%d (wire it to GND)", PIN_BUTTON);
+  batteryInit();
+  const uint16_t mv = readBatteryMv();
+  if (mv) ESP_LOGI(TAG, "battery %u mV", mv);
+  else ESP_LOGI(TAG, "no battery divider on A0; reporting battery as unknown");
+
   g_rx = xQueueCreate(16, sizeof(Msg));
   if (!pn532Init()) ESP_LOGE(TAG, "continuing without a working PN532");
 
@@ -324,13 +427,16 @@ extern "C" void app_main() {
     // channel: go back to searching rather than waiting forever.
     const TickType_t wait = (g_haveEcp && !g_tagActive) ? 0 : pdMS_TO_TICKS(1000);
     if (xQueueReceive(g_rx, &m, wait) != pdTRUE) {
+      checkButton();
       if (g_haveEcp && !g_tagActive) {
         pollOnce();
         // A quiet doorbell is indistinguishable from a dead one, so say hello
         // occasionally. One small frame every 30 s is cheap even on battery.
         if (g_baseKnown && esp_timer_get_time() - g_lastHeartbeatUs > 30000000) {
           g_lastHeartbeatUs = esp_timer_get_time();
-          send(g_base, relay::Op::HealthRsp, 0, g_pn532Ready ? 2 : 0, nullptr, 0);
+          std::vector<uint8_t> hb;
+          appendBattery(hb);
+          send(g_base, relay::Op::HealthRsp, 0, g_pn532Ready ? 2 : 0, hb.data(), hb.size());
         }
         continue;
       }

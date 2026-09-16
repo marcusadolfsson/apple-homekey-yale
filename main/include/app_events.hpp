@@ -24,6 +24,8 @@ enum {
 ESP_EVENT_DECLARE_BASE(HW_EVENT);
 enum {
     HW_ACTION,
+    HW_DOORBELL_BUTTON,   // someone pressed the doorbell button
+    HW_DOORBELL_BATTERY,  // doorbell reported its battery voltage
     HW_ALT_ACTION,
     HW_CONFIG_CHANGED,
 };

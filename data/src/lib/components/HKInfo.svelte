@@ -182,6 +182,14 @@
                 <span class="text-sm text-base-content/70">Doorbell RSSI</span>
                 <span class="text-sm font-medium">{systemInfo?.relay_rssi} dBm ({relay_signal})</span>
               </div>
+              <div class="flex items-center justify-between py-2 px-3 bg-base-100 rounded-lg">
+                <span class="text-sm text-base-content/70">Doorbell battery</span>
+                <span class="text-sm font-medium">
+                  {systemInfo?.relay_battery_mv
+                    ? ((systemInfo.relay_battery_mv / 1000).toFixed(2) + " V")
+                    : "USB / not fitted"}
+                </span>
+              </div>
             {/if}
           {/if}
           <div class="flex items-center justify-between py-2 px-3 bg-base-100 rounded-lg">

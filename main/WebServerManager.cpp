@@ -2182,6 +2182,7 @@ std::string WebServerManager::getDeviceMetrics() {
     status.addBool("relay_paired", relay.paired);
     status.addNumber("relay_rssi", relay.rssi);
     status.addBool("relay_reader_ready", relay.readerReady);
+    status.addNumber("relay_battery_mv", relay.batteryMv);
   }
   status.addNumber("nfc_reader_type", m_configManager.getConfig<espConfig::misc_config_t>().nfcReaderType);
   status.addBool("mqtt_connected", m_mqttManager ? m_mqttManager->isConnected() : false);

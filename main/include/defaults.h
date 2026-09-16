@@ -35,7 +35,9 @@
 #define MQTT_SET_CURRENT_STATE_TOPIC "homekit/set_current_state" // MQTT Control Topic for the HomeKit lock current state
 #define MQTT_STATE_TOPIC "homekit/state" // MQTT Topic for publishing the HomeKit lock target state
 #define MQTT_PROX_BAT_TOPIC "homekit/set_battery_lvl" // MQTT Control Topic for setting the battery level to be shown in HomeKit
-#define MQTT_HK_ALT_ACTION_TOPIC "alt_action" // MQTT Topic for publishing the Alt Action
+#define MQTT_HK_ALT_ACTION_TOPIC "alt_action"
+#define MQTT_DOORBELL_TOPIC "doorbell" // MQTT Topic for doorbell button presses
+#define MQTT_DOORBELL_BATTERY_TOPIC "doorbell/battery" // MQTT Topic for the doorbell battery voltage // MQTT Topic for publishing the Alt Action
 
 // MQTT Custom state
 #define C_UNLOCK 0

@@ -90,6 +90,19 @@ bool MqttManager::begin(std::string deviceID) {
       (void)data; (void)size;
       publish(m_mqttConfig.hkAltActionTopic, "1");
     });
+    m_doorbell_button = AppEventLoop::subscribe(HW_EVENT, HW_DOORBELL_BUTTON, [&](const uint8_t*, size_t){
+      // The doorbell board has no WiFi of its own: it sends one small radio frame
+      // and this mains-powered base does the MQTT publish.
+      publish(m_mqttConfig.doorbellTopic, "PRESS");
+    });
+    m_doorbell_battery = AppEventLoop::subscribe(HW_EVENT, HW_DOORBELL_BATTERY, [&](const uint8_t* data, size_t size){
+      if (size == 0 || data == nullptr) return;
+      std::span<const uint8_t> payload(data, size);
+      std::error_code ec;
+      EventValueChanged s = alpaca::deserialize<EventValueChanged>(payload, ec);
+      if (ec) return;
+      publish(m_mqttConfig.doorbellBatteryTopic, s.str, 0, true);
+    });
     m_nfc_event = AppEventLoop::subscribe(NFC_EVENT, NFC_TAP_EVENT, [&](const uint8_t* data, size_t size){
       if(size == 0 || data == nullptr) return;
       std::span<const uint8_t> payload(data, size);
@@ -579,6 +592,27 @@ void MqttManager::publishHassDiscovery() {
         p.addString("state_locking", lockingStr.c_str());
         p.addString("state_unlocking", unlockingStr.c_str());
         p.addString("state_jammed", jammedStr.c_str());
+        p.addString("availability_topic", m_mqttConfig.lwtTopic.c_str());
+    });
+
+    // Publish the doorbell button as a momentary binary sensor
+    publishConfig("Doorbell", "binary_sensor/" + m_mqttConfig.mqttClientId + "/doorbell/config", [&](JsonBuilder& p) {
+        p.addString("unique_id", (deviceID + "_doorbell").c_str());
+        p.addString("state_topic", m_mqttConfig.doorbellTopic.c_str());
+        p.addString("payload_on", "PRESS");
+        p.addString("device_class", "occupancy");
+        p.addNumber("off_delay", 2);  // momentary: no "released" message is sent
+        p.addString("availability_topic", m_mqttConfig.lwtTopic.c_str());
+    });
+
+    // Publish the doorbell battery voltage
+    publishConfig("Doorbell battery", "sensor/" + m_mqttConfig.mqttClientId + "/doorbell_battery/config", [&](JsonBuilder& p) {
+        p.addString("unique_id", (deviceID + "_doorbell_battery").c_str());
+        p.addString("state_topic", m_mqttConfig.doorbellBatteryTopic.c_str());
+        p.addString("device_class", "voltage");
+        p.addString("unit_of_measurement", "V");
+        p.addString("value_template", "{{ (value | float / 1000) | round(2) }}");
+        p.addString("state_class", "measurement");
         p.addString("availability_topic", m_mqttConfig.lwtTopic.c_str());
     });
 

@@ -113,10 +113,37 @@ HA and the lock's own HomeKit module do that. A mortise nexTouch relocks itself.
 ## Relay protocol (`main/RelayProtocol.hpp`)
 
 ESP-NOW, 10-byte header, fragmented above 240 bytes, one request in flight.
-Ops: `Ping/Pong` (the doorbell walks WiFi channels until a base answers, then pairs
-to it), `PollReq/Rsp` (ECP + timeout → tag found, UID/ATQA/SAK; flags bit1 = the
-doorbell's reader is healthy), `ApduReq/Rsp`, `PresentReq/Rsp`, `ReleaseReq/Rsp`,
-`HealthReq/Rsp`. Unencrypted for now — see "Known issues".
+Unencrypted for now — see "Known issues".
+
+- `Ping`/`Pong` — pairing, and it works from **either** side: the doorbell walks the
+  WiFi channels until a base answers, and a base with no doorbell advertises every
+  3 s. Either box can restart without breaking the link. No MAC is configured;
+  whoever answers first is adopted (trust on first contact).
+- `EcpReq`/`EcpSet` — the base hands the doorbell the 18-byte ECP frame and a poll
+  interval, so the doorbell can drive its own reader.
+- **`TagEvent`** — the doorbell announces a card. **The base sends nothing between
+  taps**: polling was inverted so a battery doorbell can sleep and so the radio is
+  free for BLE. The doorbell holds the card until `ReleaseReq` (or 5 s).
+- `ApduReq/Rsp`, `PresentReq/Rsp`, `ReleaseReq/Rsp` — the transaction itself.
+- `HealthRsp` — unsolicited heartbeat every 30 s; liveness is inferred from traffic
+  received rather than polled for (`HEARTBEAT_TIMEOUT_MS`).
+- `ButtonPress` — the doorbell button.
+
+**Tap announcements have their own queue** on the base. Sharing one queue with
+request/response replies made the polling wait swallow them.
+
+### Doorbell button and battery
+
+- **Button on D1** (any momentary switch to GND; internal pull-up, debounced 50 ms).
+  D1 is a low-power pin, so in a battery build the same wire wakes the chip from
+  deep sleep and a press costs one wake plus one frame.
+- **Battery on A0/D0** through a 1:2 divider. Use 1 MΩ + 1 MΩ (~2 µA), not Seeed's
+  suggested 200 kΩ pair (~10 µA — half the idle budget). Reported as 0 when absent.
+- Voltage is **appended to frames the doorbell already sends** (tap announcements,
+  heartbeats, button presses), so nothing transmits solely to report it.
+- The base shows both on the dashboard (pairing state, link RSSI, battery) and
+  publishes the button to `<id>/doorbell` and the battery to
+  `<id>/doorbell/battery`, with Home Assistant discovery for each.
 
 ## Hardware
 
