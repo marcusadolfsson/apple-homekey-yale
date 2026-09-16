@@ -39,6 +39,8 @@ void RemoteNfcReader::recvTrampoline(const esp_now_recv_info_t *info, const uint
   auto *self = s_instance;
   if (!self || !self->m_rx || len < (int)relay::HDR) return;
   Msg m{};
+  if (info->rx_ctrl) self->m_linkRssi = info->rx_ctrl->rssi;
+  self->m_lastHeardUs = esp_timer_get_time();
   std::memcpy(m.mac, info->src_addr, 6);
   m.len = uint16_t(std::min<size_t>(len, relay::MAX_ESPNOW));
   std::memcpy(m.data, data, m.len);
@@ -57,6 +59,7 @@ bool RemoteNfcReader::init() {
   }
   if (!m_rx) m_rx = xQueueCreate(16, sizeof(Msg));
   if (!m_responses) m_responses = xQueueCreate(8, sizeof(Response *));
+  if (!m_tagEvents) m_tagEvents = xQueueCreate(4, sizeof(Response *));
   esp_err_t err = esp_now_init();
   if (err != ESP_OK && err != ESP_ERR_ESPNOW_EXIST) {
     ESP_LOGE(TAG, "esp_now_init failed: %s", esp_err_to_name(err));
@@ -85,6 +88,7 @@ void RemoteNfcReader::stop() {
   if (m_rxTask) { vTaskDelete(m_rxTask); m_rxTask = nullptr; }
   if (m_rx) { vQueueDelete(m_rx); m_rx = nullptr; }
   if (m_responses) { vQueueDelete(m_responses); m_responses = nullptr; }
+  if (m_tagEvents) { vQueueDelete(m_tagEvents); m_tagEvents = nullptr; }
   m_started = false;
   m_doorbellKnown = false;
 }
@@ -115,6 +119,7 @@ void RemoteNfcReader::rxTask() {
         m_readerReady = (h.flags & 2) != 0;
         ESP_LOGI(TAG, "doorbell answered our hello: %02X:%02X:%02X:%02X:%02X:%02X", m_doorbell[0],
                  m_doorbell[1], m_doorbell[2], m_doorbell[3], m_doorbell[4], m_doorbell[5]);
+        sendEcp();
       }
       continue;
     }
@@ -128,7 +133,14 @@ void RemoteNfcReader::rxTask() {
         m_readerReady = (h.flags & 2) != 0;
         ESP_LOGI(TAG, "doorbell paired: %02X:%02X:%02X:%02X:%02X:%02X", m_doorbell[0], m_doorbell[1],
                  m_doorbell[2], m_doorbell[3], m_doorbell[4], m_doorbell[5]);
+        sendEcp();
       }
+      continue;
+    }
+
+    if (relay::Op(h.op) == relay::Op::EcpReq) {
+      ESP_LOGI(TAG, "doorbell asked for ECP data");
+      sendEcp();
       continue;
     }
 
@@ -149,7 +161,8 @@ void RemoteNfcReader::rxTask() {
     }
 
     auto *r = new Response{h.op, h.seq, h.flags, std::move(payload)};
-    if (xQueueSend(m_responses, &r, 0) != pdTRUE) delete r;  // caller gave up
+    QueueHandle_t q = relay::Op(h.op) == relay::Op::TagEvent ? m_tagEvents : m_responses;
+    if (xQueueSend(q, &r, 0) != pdTRUE) delete r;  // nobody waiting
   }
 }
 
@@ -200,10 +213,23 @@ void RemoteNfcReader::endDiscovery() {}
 bool RemoteNfcReader::pollForTag(std::vector<uint8_t> &uid, std::array<uint8_t, 2> &atqa,
                                  uint8_t &sak, uint32_t timeoutMs) {
   if (g_bleRadioBusy.load(std::memory_order_acquire)) {
-    // Give the radio to the lock connection; the card that triggered it has
-    // already been read.
     vTaskDelay(pdMS_TO_TICKS(100));
     return false;
+  }
+  if (m_doorbellKnown) {
+    // Inverted polling: the doorbell watches its own reader and announces a card,
+    // so the base sends nothing at all between taps.
+    Response *r = nullptr;
+    if (xQueueReceive(m_tagEvents, &r, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) return false;
+    const std::vector<uint8_t> p = std::move(r->payload);
+    delete r;
+    if (p.empty() || p.size() < size_t(1 + p[0] + 3)) return false;
+    uid.assign(p.begin() + 1, p.begin() + 1 + p[0]);
+    atqa[0] = p[1 + p[0]];
+    atqa[1] = p[2 + p[0]];
+    sak = p[3 + p[0]];
+    m_apduCount = m_apduTotalUs = m_apduMaxUs = 0;
+    return true;
   }
   if (!m_doorbellKnown) {
     // The doorbell stops pinging once paired, so after a base restart nobody is
@@ -214,35 +240,17 @@ bool RemoteNfcReader::pollForTag(std::vector<uint8_t> &uid, std::array<uint8_t, 
       send(BROADCAST, relay::Op::Ping, ++m_seq, 0, nullptr, 0);
     }
   }
-  uint8_t req[22];
-  std::memcpy(req, m_ecpData.data(), 18);
-  const uint32_t t = timeoutMs;
-  std::memcpy(req + 18, &t, 4);
-  Response rsp;
-  m_pollsSent++;
-  const bool answered = request(relay::Op::PollReq, req, sizeof(req), relay::Op::PollRsp,
-                                timeoutMs + 400, rsp);
-  if (answered) {
-    m_pollsAnswered++;
-    m_readerReady = (rsp.flags & 2) != 0;
-  }
-  const int64_t now = esp_timer_get_time();
-  if (now - m_lastStatUs > 5000000) {
-    m_lastStatUs = now;
-    ESP_LOGI(TAG, "relay polls: %u sent, %u answered, doorbell reader %s", m_pollsSent,
-             m_pollsAnswered, m_readerReady ? "ready" : "NOT ready");
-    m_pollsSent = m_pollsAnswered = 0;
-  }
-  if (!answered) return false;
-  if (!(rsp.flags & 1)) return false;  // answered, but no tag in the field
-  const auto &p = rsp.payload;
-  if (p.empty() || p.size() < size_t(1 + p[0] + 3)) return false;
-  uid.assign(p.begin() + 1, p.begin() + 1 + p[0]);
-  atqa[0] = p[1 + p[0]];
-  atqa[1] = p[2 + p[0]];
-  sak = p[3 + p[0]];
-  m_apduCount = m_apduTotalUs = m_apduMaxUs = 0;  // new transaction
-  return true;
+  vTaskDelay(pdMS_TO_TICKS(200));
+  return false;
+}
+
+void RemoteNfcReader::sendEcp() {
+  if (!m_doorbellKnown) return;
+  uint8_t payload[20];
+  std::memcpy(payload, m_ecpData.data(), 18);
+  const uint16_t interval = POLL_INTERVAL_MS;
+  std::memcpy(payload + 18, &interval, 2);
+  send(m_doorbell, relay::Op::EcpSet, ++m_seq, 0, payload, sizeof(payload));
 }
 
 bool RemoteNfcReader::exchangeApdu(const std::vector<uint8_t> &send_, std::vector<uint8_t> &recv,
@@ -288,13 +296,15 @@ void RemoteNfcReader::releaseTag() {
 }
 
 bool RemoteNfcReader::healthCheck() {
-  if (!m_doorbellKnown) return true;  // nothing to check until a doorbell pairs
-  // Health polls are ESP-NOW traffic too: skip them while the lock link is up.
-  if (g_bleRadioBusy.load(std::memory_order_acquire)) return true;
-  Response rsp;
-  if (!request(relay::Op::HealthReq, nullptr, 0, relay::Op::HealthRsp, 500, rsp)) {
-    ESP_LOGW(TAG, "doorbell did not answer a health check");
-    return true;  // keep the reader alive; the doorbell may just be out of range
+  // With the doorbell announcing taps, the base sends nothing between them, so
+  // liveness comes from the doorbell's own heartbeat rather than from a poll of
+  // ours. Asking over the air would defeat the point of the inversion (and the
+  // reply raced the tap-announcement wait).
+  if (!m_doorbellKnown) return true;
+  const int64_t silentMs = (esp_timer_get_time() - m_lastHeardUs) / 1000;
+  if (silentMs > HEARTBEAT_TIMEOUT_MS) {
+    ESP_LOGW(TAG, "no word from the doorbell for %lld s", silentMs / 1000);
+    return false;
   }
-  return rsp.flags != 0;
+  return true;
 }

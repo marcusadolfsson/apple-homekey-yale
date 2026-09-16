@@ -27,6 +27,12 @@ enum class Op : uint8_t {
   ReleaseRsp = 10,
   HealthReq = 11,
   HealthRsp = 12,
+  // Inverted polling: the doorbell watches its own reader and announces a tap,
+  // instead of the base asking ~10x/s. The base is then silent between taps,
+  // which is what lets the doorbell sleep on battery.
+  EcpReq = 13,    // doorbell -> base: I have no ECP data, send it
+  EcpSet = 14,    // base -> doorbell: 18-byte ECP frame + poll interval (ms, u16)
+  TagEvent = 15,  // doorbell -> base: unsolicited; a card is in the field
 };
 
 struct __attribute__((packed)) Header {

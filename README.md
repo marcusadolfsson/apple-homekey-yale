@@ -1,353 +1,56 @@
-<div align="center">
-  <img width="169" height="200" alt="homekey-logo-200x200" src="https://github.com/user-attachments/assets/6c4bc1e8-c294-4a4b-842a-9837a680b913" />
+# apple-homekey-yale
 
-  # HomeKey-ESP32
-  [![Discord](https://badgen.net/discord/members/VWpZ5YyUcm?icon=discord)](https://discord.com/invite/VWpZ5YyUcm)
-  [![CI](https://github.com/rednblkx/HomeKey-ESP32/actions/workflows/esp32.yml/badge.svg?branch=main)](https://github.com/rednblkx/HomeKey-ESP32/actions/workflows/esp32.yml)
-  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-  
-  **Apple HomeKey functionality for the rest of us**
+Tap an iPhone (Apple Home Key, Express Mode) on a reader and a **Yale nexTouch**
+mortise lock unlocks over Bluetooth — no cloud, no hub and no Yale app in the
+unlock path. The reader can also be split in two, so the part by the door holds
+no credentials and can run on a battery.
 
-  [Documentation](https://rednblkx.github.io/HomeKey-ESP32/)
+Built on [rednblkx/HomeKey-ESP32](https://github.com/rednblkx/HomeKey-ESP32),
+which provides the HomeKit and Home Key side. Its documentation still applies to
+everything below — see [their docs](https://rednblkx.github.io/HomeKey-ESP32/) and
+the original README, kept here as [README.upstream.md](README.upstream.md).
 
-</div>
+## What this repository adds
 
-## What is HomeKey-ESP32?
+| Addition | Where |
+|---|---|
+| **Yale/August BLE lock driver** — a C++ port of `yalexs-ble`: offline-key handshake, unlock, GATT cache in NVS | `main/YaleBleLock.*` |
+| **PN532 over I2C** (upstream supports SPI only) | `main/Pn532I2cTransport.*`, reader type 3 |
+| **Relay reader** — the NFC front end lives on a second board, reached over ESP-NOW | `main/RemoteNfcReader.*`, reader type 4 |
+| **Relay doorbell firmware** — holds no keys, never joins WiFi, announces taps | `relay-doorbell/` |
+| Single 3.75 MB app partition (the BLE stack outgrew the OTA layout) | `single_app.csv` |
+| Doorbell link status (paired / signal strength) on the dashboard | web UI |
 
-The project aims to be the easy DIY solution for using Apple's HomeKey feature without the need to purchase a compatible smart lock that you probably don't want. HomeKey-ESP32 brings Apple's secure NFC-based unlocking to an ESP32 module near you, enabling you to unlock doors and whatnot with a simple tap of your iPhone or Apple Watch.
+**[CLAUDE.md](CLAUDE.md) is the real documentation**: architecture, the Yale wire
+protocol, measurements, hard-won gotchas, and what is still unfinished.
 
-**No proprietary hardware required** – just an ESP32 and one of the supported NFC modules
+## Measured
 
-> [!WARNING]
-> The flash memory is not encrypted as this kinda started as a pet project of mine but a lot of people started using
-> so unfortunately it's stuck like this because migration would be painful and i don't want to be telling people to
-> reconfigure their device if they want to update.
->
-> If you care about this, i'm working on a new project implementing the new Aliro standard and flash will be
-> encrypted first thing, however, honestly don't know when that will be public, you can join the Discord server
-> if you want to know as soon as it is available.
+Tap to door open, reader next to the lock: **~3.2 s** — HomeKey exchange 307 ms,
+BLE connect 722 ms, handshake 367 ms, and **1.77 s of that is the lock's own
+mechanism**. Apple's Home Key tolerates the relay: exchanges of 42–158 ms still
+complete. Range matters more than anything else — the same firmware takes 9.9 s
+when the base is far from the lock.
 
-## Getting Started
+## Build
 
-> [!TIP]
-> A wiki documenting the project can be found at https://rednblkx.github.io/HomeKey-ESP32/
-
-### Prerequisites
-
-- **ESP32 Development Board**
-- **NFC reader** - one of:
-  - **PN532** (SPI)
-  - **PN7161** (SPI) - available in the dev release
-  - **ST25R3916** (I2C) - available in the dev release
-- **USB Cable** (for flashing and power)
-- **Computer** (Windows, Mac, or Linux)
-- **Basic Electronics Knowledge** (not a problem if you're new to this, ask away!)
-
-#### Ethernet
-
-The following chips are supported for Ethernet:
-
--  W5500
--  DM9051
--  KSZ8851
--  LAN8720 / LAN8710
--  TLK110
--  RTL8201
--  DP83848
--  KSZ8041
--  KSZ8081
-
-> [!IMPORTANT]
->
-> The following are only supported for ESP32-WROOM-32 boards as other variants lack the internal EMAC needed for the RMII interface:
-> -  LAN8720 / LAN8710
-> -  TLK110
-> -  RTL8201
-> -  DP83848
-> -  KSZ8041
-> -  KSZ8081
-
-### Installation Steps
-
-1. **Download Firmware**
-   - Visit [GitHub Releases](https://github.com/rednblkx/HomeKey-ESP32/releases/latest)
-   - Download the `*.firmware.factory.bin` file
-   - This contains everything you need - no compilation required!
-
-2. **Connect Your Hardware**
-   - Wire your chosen NFC module to your ESP32 using the default pins
-   - Refer to the [detailed wiring guide](https://rednblkx.github.io/HomeKey-ESP32/setup/#21-nfc-module-wiring) for your specific setup
-
-3. **Flash the Firmware**
-   ```bash
-   # Install esptool (one-time setup)
-   pip install esptool
-   
-   # Flash the firmware (replace YOUR_PORT)
-   esptool.py --port /dev/ttyUSB0 write_flash 0x0 firmware.factory.bin
-   ```
-   
-   **Prefer a GUI?** Use the [browser-based flasher](https://espressif.github.io/esptool-js/) - no command line needed!
-
-4. **Initial Setup**
-   - Connect to the device's WiFi AP (`HomeSpan-Setup` / `homespan`)
-   - Access the web interface at `http://192.168.4.1`
-   - Configure your WiFi credentials and HomeKit setup code
-   - Pair with Apple Home using code: `466-37-726`
-
-5. **Start Using HomeKey!**
-   - Hold your iPhone or Apple Watch near the NFC reader
-   - Enjoy instant, secure access to your home! 🎉
-
-### Updating
-
-Follow the update in the documentation at: https://rednblkx.github.io/HomeKey-ESP32/updates/
-
-## System Architecture
-
-<div align="center">
-  
-```mermaid
-graph TD
-    A[iPhone/Apple Watch] -->|RF| B[NFC Module]
-    B -->|SPI| C[ESP32]
-    C -->|MQTT| D[Home Assistant/Broker]
-    C -->|HomeKit| E[Apple Home]
-    C -->|HTTP| F[Web Interface]
-    C -->|GPIO| G[Physical Lock]
-    
-    subgraph "HomeKey-ESP32 Core"
-        C
-        H[ConfigManager]
-        I[LockManager]
-        J[NfcManager]
-        K[HomeKitLock]
-        L[WebServerManager]
-        M[MqttManager]
-    end
-    
-    style A fill:#1f2937,stroke:#374151,color:#fff
-    style C fill:#059669,stroke:#047857,color:#fff
-    style B fill:#3b82f6,stroke:#2563eb,color:#fff
-```
-
-</div>
-
-## ✨ Key Features
-
-### **Apple HomeKey Integration**
-- **Express Mode**: Unlock without waking your device
-- **Power Reserve**: Unlock even when the device needs to be charged
-- **Multi-Device Support**: Works with iPhone and Apple Watch
-- **Fast Authentication**: Sub-300ms unlock times
-
-### **Smart Home Ready**
-- **HomeKit Native**: Full Apple Home ecosystem integration
-- **MQTT Support**: Connect to Home Assistant, OpenHAB, and other platforms
-- **Home Assistant Discovery**: Automatic device detection and configuration
-- **Custom States**: Support for complex lock states (jamming, unlocking, etc.)
-
-### **Modern Web Interface**
-- **Svelte Frontend**: Responsive, modern UI built with Svelte 5 + Tailwind CSS
-- **Real-time Updates**: WebSocket-powered live status updates
-- **OTA Updates**: Over-the-air firmware updates via web interface
-- **Configuration Management**: Easy setup without recompiling
-
-### **Developer Friendly**
-- **Open Source**: MIT licensed, community-driven development
-- **Modular Architecture**: Clean separation of concerns
-- **Event System**: Pub/sub architecture for extensibility
-- **Comprehensive Logging**: Debug and monitor with detailed logs
-
-## Development
-
-<div align="center">
-  
-```mermaid
-graph TD
-  %% External Systems & Hardware
-  subgraph "External World"
-      A[iPhone / Apple Watch]
-      B[Apple Home]
-      C[Web Browser]
-      D[MQTT Broker]
-      E[Physical Lock, Buttons & LEDs]
-  end
-
-  %% Main Application on ESP32
-  subgraph "HomeKey-ESP32 Core"
-      
-      subgraph "Interface Managers (I/O)"
-          direction LR
-          Nfc[NfcManager]
-          HK[HomeKitLock]
-          Web[WebServerManager]
-          Mqtt[MqttManager]
-          Hw[HardwareManager]
-      end
-
-      subgraph "Logic Core (State Machine)"
-          Lock[LockManager]
-      end
-
-      subgraph "Data Services (Persistence)"
-          direction LR
-          Config[ConfigManager]
-          Reader[ReaderDataManager]
-          NVS[(NVS Storage)]
-      end
-
-      %% High-level Data and Control Flow
-      DataServices[Data Services] -- "Provides Config & Reader Data" --> InterfaceManagers[Interface Managers]
-      DataServices -- "Provides Config" --> LogicCore[Logic Core]
-      Config -- "Reads/Writes" --> NVS
-      Reader -- "Reads/Writes" --> NVS
-      
-      InterfaceManagers -- "State Change Requests (e.g., Unlock)" --> Lock
-      Lock -- "Actions & State Updates" --> InterfaceManagers
-  end
-  
-  %% Connections to the External World
-  A -- NFC --> Nfc
-  B -- HomeKit --> HK
-  C -- HTTP/WebSocket --> Web
-  D -- MQTT --> Mqtt
-  E -- GPIO --> Hw
-  
-  Hw -- GPIO --> E
-  HK -- HomeKit --> B
-  Web -- HTTP/WebSocket --> C
-  Mqtt -- MQTT --> D
-
-  %% Styling for clarity
-  style A fill:#1f2937,stroke:#374151,color:#fff
-  style B fill:#1f2937,stroke:#374151,color:#fff
-  style C fill:#1f2937,stroke:#374151,color:#fff
-  style D fill:#1f2937,stroke:#374151,color:#fff
-  style E fill:#1f2937,stroke:#374151,color:#fff
-
-  style Nfc fill:#3b82f6,stroke:#2563eb,color:#fff
-  style HK fill:#059669,stroke:#047857,color:#fff
-  style Web fill:#f59e0b,stroke:#d97706,color:#fff
-  style Mqtt fill:#ef4444,stroke:#dc2626,color:#fff
-  style Hw fill:#8b5cf6,stroke:#7c3aed,color:#fff
-
-  style Lock fill:#ec4899,stroke:#db2777,color:#fff
-  
-  style Config fill:#6b7280,stroke:#4b5563,color:#fff
-  style Reader fill:#6b7280,stroke:#4b5563,color:#fff
-  style NVS fill:#9ca3af,stroke:#6b7280,color:#fff
-```
-
-</div>
-
-### Project Structure
-
-```
-HomeKey-ESP32/
-├── main/                    # Core ESP32 application
-│   ├── main.cpp            # Application entry point
-│   ├── ConfigManager.cpp    # Configuration management
-│   ├── ReaderDataManager.cpp # Reader data management
-│   ├── NfcManager.cpp      # NFC communication
-│   ├── Pn532Reader.cpp     # PN532 backend (SPI)
-│   ├── Pn7160Reader.cpp    # PN7160 backend
-│   ├── St25r3916Reader.cpp # ST25R3916 backend (I2C)
-│   ├── HomeKitLock.cpp     # HomeKit integration
-│   ├── LockManager.cpp     # Lock state management
-│   ├── MqttManager.cpp     # MQTT client
-│   ├── WebServerManager.cpp # Web interface
-│   ├── WebSocketLogSinker.cpp # WebSocket logging sinker
-│   ├── HardwareManager.cpp # Hardware manager
-│   └── HKServices.cpp # HomeKit services
-├── data/                   # Web interface files
-│   ├── src/               # Vue.js application
-│   └── index.html         # Web UI entry point
-├── components/            # External dependencies
-│   ├── HK-HomeKit-Lib/   # HomeKey implementation
-│   ├── HomeSpan/         # HomeKit framework
-│   └── PN532/            # NFC driver
-└── docs/                 # Documentation
-    └── content/          # Hugo documentation
-```
-
-### Core Components
-
-| Component | File | Purpose |
-|-----------|------|---------|
-| **NFC Manager** | [`NfcManager.cpp`](main/NfcManager.cpp) | Drives the selected NFC backend and HomeKey authentication |
-| **NFC Backends** | [`Pn532Reader.cpp`](main/Pn532Reader.cpp) / [`Pn7160Reader.cpp`](main/Pn7160Reader.cpp) / [`St25r3916Reader.cpp`](main/St25r3916Reader.cpp) | Reader implementations behind the common `INfcReader` interface |
-| **HomeKit Bridge** | [`HomeKitLock.cpp`](main/HomeKitLock.cpp) | Manages Apple HomeKit integration and pairing |
-| **Lock Manager** | [`LockManager.cpp`](main/LockManager.cpp) | Controls lock state transitions and GPIO actions |
-| **MQTT Client** | [`MqttManager.cpp`](main/MqttManager.cpp) | Enables smart home integration via MQTT |
-| **Web Server** | [`WebServerManager.cpp`](main/WebServerManager.cpp) | Provides configuration UI and OTA updates |
-| **Config Manager** | [`ConfigManager.cpp`](main/ConfigManager.cpp) | Handles persistent configuration storage |
-
-### Building from Source
+ESP-IDF v5.5.5, target ESP32-C6:
 
 ```bash
-# Install dependencies
-git submodule update --init --recursive
-
-# Install esp-idf v5.4 or newer -- CI builds against v5.5.4.
-# Earlier versions do not compile: the pn7160 and pn532_hal components use
-# esp_log_buffer.h and spi_bus_dma_memory_alloc, both introduced in v5.4.
-# See https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/index.html#get-started
-
-# Build firmware
-idf.py build
-
-# Flash to device
-idf.py -p /dev/ttyUSB0 flash
-
-# Monitor output
-idf.py monitor
+. ~/esp/esp-idf/export.sh
+idf.py set-target esp32c6 && idf.py build      # base / single-device firmware
+cd relay-doorbell && idf.py build              # doorbell firmware
 ```
 
-### Contributing
+OTA is disabled, so flash over USB — and flash the parts individually rather than
+the merged image, or you will erase the HomeKit pairing and keys in NVS. See
+CLAUDE.md for the exact command and for backing up NVS first.
 
-Contributions are welcomed! Please see the [Contributing Guidelines](CONTRIBUTING.md) for details.
+## Security notes
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'feat: Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request against the `main` branch
+The lock's offline key is entered in the device's web page, masked on read-back,
+and never logged or committed. It lives in NVS, which is **not encrypted** by
+default — turn on flash encryption and the web UI login before deploying. The
+ESP-NOW link between base and doorbell is currently unauthenticated.
 
-## Support the Project
-
-HomeKey-ESP32 is openly developed and maintained by the community. Your support helps us continue improving the project.
-
-- **Star the repository** to show your appreciation
-- **Report bugs** to help improve stability
-- **Suggest features** to guide development
-- **Share the project** with your network
-- **Contribute documentation** to help others
-
-## Credits
-
-- **[@kormax](https://github.com/kormax)**: Reverse-engineered the HomeKey NFC protocol and published the foundational [PoC implementation](https://github.com/kormax/apple-home-key-reader)
-- **[@kupa22](https://github.com/kupa22)**: Researched the HAP (HomeKit Accessory Protocol) side of HomeKey
-- **[HomeSpan](https://github.com/HomeSpan/HomeSpan)**: Excellent HomeKit framework that powers our integration
-- **[ESP-IDF](https://github.com/espressif/esp-idf)**: Robust IoT development framework from Espressif
-
-## License & Legal
-
-### License
-
-This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
-
-### Disclaimer
-
-**Important**: This project implements Apple HomeKey functionality through reverse engineering. While we strive for security and compatibility:
-
-- **Not affiliated** in any shape or form nor condoned by Apple Inc.
-- **Use at your own risk** for security-critical applications
-- **May lack elements** from Apple's private specifications
-- **Subject to change** as Apple updates their protocols
-
-### Trademarks
-
-- **Apple**, **iPhone**, and **Apple Watch** are trademarks of Apple Inc.
-- **ESP32** is a trademark of Espressif Systems (Shanghai) Co., Ltd.
-- **Home Assistant** is a trademark of Open Home Foundation
+MIT licensed, as upstream.

@@ -18,6 +18,7 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
+#include <array>
 #include <cstring>
 #include <vector>
 
@@ -44,6 +45,15 @@ pn532::Frontend *g_pn532 = nullptr;
 bool g_pn532Ready = false;
 int64_t g_lastInitTryUs = 0;
 uint32_t g_polls = 0;
+// Inverted polling state: the doorbell drives its own reader once the base has
+// given it an ECP frame, and stays quiet on the radio until a card shows up.
+std::array<uint8_t, 18> g_ecp{};
+bool g_haveEcp = false;
+uint16_t g_pollIntervalMs = 100;
+bool g_tagActive = false;       // a card is being worked on; stop polling
+int64_t g_tagActiveUs = 0;
+int64_t g_lastEcpReqUs = 0;
+int64_t g_lastHeartbeatUs = 0;
 
 // Reassembly for the one request in flight; the base is strictly request/response.
 struct {
@@ -108,6 +118,36 @@ bool pn532Init() {
   g_pn532->RFConfiguration(0x02, {0x00, 0x0B, 0x10});
   g_pn532->RFConfiguration(0x04, {0xFF});
   return true;
+}
+
+// Poll our own reader once; announce to the base if a card is there.
+void pollOnce() {
+  if (!g_pn532Ready) {
+    if (esp_timer_get_time() - g_lastInitTryUs > 5000000) {
+      g_lastInitTryUs = esp_timer_get_time();
+      pn532Init();
+    }
+    return;
+  }
+  std::vector<uint8_t> res;
+  (void)g_pn532->InCommunicateThru(g_ecp, res, 50);
+  std::vector<uint8_t> uid;
+  std::array<uint8_t, 2> atqa{};
+  uint8_t sak = 0;
+  if (g_pn532->InListPassiveTarget(0x00, uid, atqa, sak, uint16_t(g_pollIntervalMs)) !=
+      pn532::Status::SUCCESS) {
+    return;
+  }
+  std::vector<uint8_t> out;
+  out.push_back(uint8_t(uid.size()));
+  out.insert(out.end(), uid.begin(), uid.end());
+  out.push_back(atqa[0]);
+  out.push_back(atqa[1]);
+  out.push_back(sak);
+  g_tagActive = true;  // hold the card; the base will drive APDUs now
+  g_tagActiveUs = esp_timer_get_time();
+  send(g_base, relay::Op::TagEvent, 0, 3, out.data(), out.size());
+  ESP_LOGI(TAG, "tag detected, announced to base");
 }
 
 void handlePoll(const Msg &m, const relay::Header &h, const std::vector<uint8_t> &payload) {
@@ -175,6 +215,7 @@ void handle(const Msg &m, const relay::Header &h, const std::vector<uint8_t> &pa
         addPeer(g_base);
         ESP_LOGI(TAG, "base said hello: %02X:%02X:%02X:%02X:%02X:%02X", g_base[0], g_base[1],
                  g_base[2], g_base[3], g_base[4], g_base[5]);
+        send(g_base, relay::Op::EcpReq, 0, 0, nullptr, 0);
       }
       break;
     case relay::Op::Pong:
@@ -184,9 +225,20 @@ void handle(const Msg &m, const relay::Header &h, const std::vector<uint8_t> &pa
         addPeer(g_base);
         ESP_LOGI(TAG, "base found on channel %u: %02X:%02X:%02X:%02X:%02X:%02X", g_channel,
                  g_base[0], g_base[1], g_base[2], g_base[3], g_base[4], g_base[5]);
+        send(g_base, relay::Op::EcpReq, 0, 0, nullptr, 0);
       }
       break;
-    case relay::Op::PollReq: handlePoll(m, h, payload); break;
+    case relay::Op::PollReq: handlePoll(m, h, payload); break;  // legacy path, still supported
+    case relay::Op::EcpSet:
+      if (payload.size() >= 20) {
+        std::memcpy(g_ecp.data(), payload.data(), 18);
+        std::memcpy(&g_pollIntervalMs, payload.data() + 18, 2);
+        if (g_pollIntervalMs < 20) g_pollIntervalMs = 20;
+        const bool first = !g_haveEcp;
+        g_haveEcp = true;
+        if (first) ESP_LOGI(TAG, "got ECP data from base; polling every %u ms", g_pollIntervalMs);
+      }
+      break;
     case relay::Op::ApduReq: handleApdu(m, h, payload); break;
     case relay::Op::PresentReq: {
       (void)g_pn532->InRelease(1);
@@ -198,6 +250,7 @@ void handle(const Msg &m, const relay::Header &h, const std::vector<uint8_t> &pa
     case relay::Op::ReleaseReq:
       (void)g_pn532->InRelease(1);
       (void)g_pn532->setPassiveActivationRetries(0);
+      g_tagActive = false;  // resume watching for the next card
       send(m.mac, relay::Op::ReleaseRsp, h.seq, 1, nullptr, 0);
       break;
     case relay::Op::HealthReq: {
@@ -269,7 +322,28 @@ extern "C" void app_main() {
     Msg m{};
     // If the base has been silent for a while it has probably restarted or moved
     // channel: go back to searching rather than waiting forever.
-    if (xQueueReceive(g_rx, &m, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    const TickType_t wait = (g_haveEcp && !g_tagActive) ? 0 : pdMS_TO_TICKS(1000);
+    if (xQueueReceive(g_rx, &m, wait) != pdTRUE) {
+      if (g_haveEcp && !g_tagActive) {
+        pollOnce();
+        // A quiet doorbell is indistinguishable from a dead one, so say hello
+        // occasionally. One small frame every 30 s is cheap even on battery.
+        if (g_baseKnown && esp_timer_get_time() - g_lastHeartbeatUs > 30000000) {
+          g_lastHeartbeatUs = esp_timer_get_time();
+          send(g_base, relay::Op::HealthRsp, 0, g_pn532Ready ? 2 : 0, nullptr, 0);
+        }
+        continue;
+      }
+      if (g_baseKnown && !g_haveEcp && esp_timer_get_time() - g_lastEcpReqUs > 2000000) {
+        g_lastEcpReqUs = esp_timer_get_time();
+        send(g_base, relay::Op::EcpReq, 0, 0, nullptr, 0);
+      }
+      // A base that stops driving APDUs after a tap should not wedge us.
+      if (g_tagActive && esp_timer_get_time() - g_tagActiveUs > 5000000) {
+        ESP_LOGW(TAG, "no APDUs after announcing a tag; resuming polling");
+        (void)g_pn532->InRelease(1);
+        g_tagActive = false;
+      }
       if (g_baseKnown && esp_timer_get_time() - lastRequestUs > 30000000) {
         ESP_LOGW(TAG, "no requests for 30 s; searching for a base again");
         g_baseKnown = false;

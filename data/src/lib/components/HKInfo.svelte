@@ -9,6 +9,8 @@
 
   let wifi_rssi = $derived(systemInfo?.wifi_rssi);
   let wifi_signal = $derived.by(() => calculateWifiSignal(wifi_rssi));
+  // Same scale for the ESP-NOW link to the doorbell.
+  let relay_signal = $derived.by(() => calculateWifiSignal(systemInfo?.relay_rssi));
 </script>
 
 <div class="w-full py-6">
@@ -166,6 +168,22 @@
             <span class="text-sm text-base-content/70">NFC Module</span>
             <span class="text-sm font-medium">{systemInfo?.nfc_connected ? "Connected" : "Disconnected"}</span>
           </div>
+          {#if systemInfo?.nfc_reader_type === 4}
+            <div class="flex items-center justify-between py-2 px-3 bg-base-100 rounded-lg">
+              <span class="text-sm text-base-content/70">Doorbell link</span>
+              <span class="text-sm font-medium">
+                {systemInfo?.relay_paired
+                  ? (systemInfo?.relay_reader_ready ? "Paired" : "Paired (reader not ready)")
+                  : "Not paired"}
+              </span>
+            </div>
+            {#if systemInfo?.relay_paired}
+              <div class="flex items-center justify-between py-2 px-3 bg-base-100 rounded-lg">
+                <span class="text-sm text-base-content/70">Doorbell RSSI</span>
+                <span class="text-sm font-medium">{systemInfo?.relay_rssi} dBm ({relay_signal})</span>
+              </div>
+            {/if}
+          {/if}
           <div class="flex items-center justify-between py-2 px-3 bg-base-100 rounded-lg">
             <span class="text-sm text-base-content/70">MQTT broker</span>
             <span class="text-sm font-medium">{systemInfo?.mqtt_connected ? "Connected" : "Disconnected"}</span>

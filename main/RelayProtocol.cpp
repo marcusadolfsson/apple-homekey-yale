@@ -15,6 +15,9 @@ const char *opName(Op op) {
     case Op::ReleaseRsp: return "release-rsp";
     case Op::HealthReq: return "health";
     case Op::HealthRsp: return "health-rsp";
+    case Op::EcpReq: return "ecp-req";
+    case Op::EcpSet: return "ecp-set";
+    case Op::TagEvent: return "tag-event";
   }
   return "?";
 }

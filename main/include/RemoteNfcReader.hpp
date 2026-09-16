@@ -45,7 +45,17 @@ public:
   bool exchangeApdu(const std::vector<uint8_t> &send, std::vector<uint8_t> &recv,
                     uint32_t timeoutMs) override;
   bool healthCheck() override;
-  bool updateECP() override { return true; }  // ECP travels with every poll
+  bool updateECP() override {
+    sendEcp();  // reader identity changed: push it to the doorbell
+    return true;
+  }
+
+  /** Link status for the web UI: is a doorbell paired, how strong is the link. */
+  struct LinkStatus { bool paired; int8_t rssi; bool readerReady; };
+  static LinkStatus linkStatus() {
+    if (!s_instance) return {false, 0, false};
+    return {s_instance->m_doorbellKnown, s_instance->m_linkRssi, s_instance->m_readerReady};
+  }
 
 private:
   struct Msg {
@@ -66,6 +76,7 @@ private:
                uint32_t timeoutMs, Response &out);
   void send(const uint8_t mac[6], relay::Op op, uint8_t seq, uint8_t flags, const uint8_t *payload,
             size_t len);
+  void sendEcp();
 
   static RemoteNfcReader *s_instance;
 
@@ -75,7 +86,11 @@ private:
   uint8_t m_seq = 0;
 
   QueueHandle_t m_rx = nullptr;        // frames from the ESP-NOW callback
-  QueueHandle_t m_responses = nullptr; // reassembled responses for the caller
+  QueueHandle_t m_responses = nullptr; // replies to requests we sent
+  // Unsolicited tap announcements get their own queue: the polling task waits on
+  // this one continuously, and would otherwise consume replies meant for
+  // exchangeApdu()/healthCheck().
+  QueueHandle_t m_tagEvents = nullptr;
   TaskHandle_t m_rxTask = nullptr;
   bool m_started = false;
 
@@ -83,6 +98,10 @@ private:
   uint32_t m_apduCount = 0, m_apduTotalUs = 0, m_apduMaxUs = 0;
   uint32_t m_pollsSent = 0, m_pollsAnswered = 0;
   bool m_readerReady = false;
+  int8_t m_linkRssi = 0;  // of the last frame heard from the doorbell
+  static constexpr uint16_t POLL_INTERVAL_MS = 100;
+  static constexpr int64_t HEARTBEAT_TIMEOUT_MS = 90000;
+  int64_t m_lastHeardUs = 0;
   int64_t m_lastStatUs = 0;
   int64_t m_lastHelloUs = 0;
 
