@@ -562,7 +562,10 @@ void YaleBleLock::performCommand(Cmd cmd) {
     ~BusyGuard() { g_bleRadioBusy.store(false, std::memory_order_release); }
   } busyGuard;
   if (!ensureConnected()) {
-    ESP_LOGE(TAG, "%s failed: could not establish a session with the lock", cmdName(cmd));
+    // An abort is the tap that interrupted us taking priority; that tap's own
+    // unlock is already queued, so this command is simply superseded.
+    if (m_attemptAborted) ESP_LOGI(TAG, "%s superseded by a newer tap", cmdName(cmd));
+    else ESP_LOGE(TAG, "%s failed: could not establish a session with the lock", cmdName(cmd));
     return;
   }
   Frame resp{};
