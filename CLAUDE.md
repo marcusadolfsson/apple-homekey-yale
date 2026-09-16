@@ -195,25 +195,37 @@ which is *not encrypted* — enable flash encryption before deploying.
 
 ## Known issues / next steps
 
-1. **The base polls the doorbell ~10×/s.** Fine on mains, fatal on battery. Invert
-   it: the doorbell should detect a card itself (ST25R3916 low-power detection) and
-   announce it.
-0. **Lock sharing.** The lock accepts very few simultaneous BLE connections, and
+1. **The relay link is unencrypted and unauthenticated, and pairing is trust-on-
+   first-contact.** No MAC is configured, so any ESP-NOW device in range can claim
+   to be the doorbell. It cannot forge an unlock (the base verifies the phone
+   cryptographically) but it can disrupt. Next: an optional "Doorbell MAC" setting
+   plus encrypted ESP-NOW peers with a shared key.
+2. **Lock sharing.** The lock accepts very few simultaneous BLE connections, and
    Home Assistant connects to refresh state after each unlock. At normal tap spacing
-   and range this costs at most a retry, but if collisions show up in daily use the
-   fix is for HA to take front-door state from this reader over MQTT and stop
-   connecting itself. The reader and HA currently share one offline key and slot:
-   that is safe per-session (each connection derives fresh session keys) but means a
-   key rotation breaks both at once, and unlocks cannot be attributed to a person.
-   A dedicated slot for the reader is the eventual answer.
-2. **Relay round trips average 77 ms**, well above ESP-NOW's ~5–15 ms. Suspect WiFi
-   contention on the base. Next: pin the channel, quieten logging, consider raw
-   802.15.4.
-3. **The relay link is unencrypted and unauthenticated.** ESP-NOW supports encrypted
-   peers; a rogue transmitter can currently answer polls (it cannot forge an unlock —
-   the base verifies the phone cryptographically — but it can disrupt).
-4. Occasional "doorbell did not answer a health check" — rough edge in overlapping
-   request/response handling.
+   and range this costs at most a retry; if collisions appear in daily use, the fix
+   is for HA to take front-door state from this reader over MQTT and stop connecting
+   itself. The reader and HA also share one offline key and slot: safe per session
+   (each connection derives fresh session keys) but a key rotation would break both
+   at once, and unlocks cannot be attributed to a person. The reader should get its
+   own slot — create a dedicated account, invite it to the lock, open the lock with
+   it once over Bluetooth in person so the key is *loaded*, then extract key and slot.
+3. **Relay round trips run 28–160 ms**, above ESP-NOW's usual 5–15 ms; the largest
+   is the iPhone's own crypto rather than the link. Against a directly attached
+   reader the relay adds ~40 ms to a whole transaction, so this is low priority.
+4. **Still to do for a battery doorbell:** ST25R3916 in place of the PN532 (its
+   low-power card detection is the ~3 µA that makes idling possible), deep sleep
+   between taps with wake on the reader's IRQ and on the button, and a measurement
+   with a Nordic PPK2 rather than an estimate.
 5. Diagnostics still compiled in: I2C bus scan, BLE scan reports, relay statistics.
 6. **Web UI authentication is off by default**; turn it on before leaving a device
-   running. Also enable flash encryption.
+   running. Also enable flash encryption — the lock's offline key sits in plain NVS.
+7. The doorbell's USB console goes quiet after a reset until the port re-enumerates;
+   reopen the port rather than assuming the board has crashed.
+
+## Status
+
+Working end to end: iPhone Home Key tap on the doorbell → relayed over ESP-NOW →
+base authenticates → Yale unlocks over BLE, ~3.2 s next to the lock. Both boards
+recover pairing on their own after either restarts. Doorbell button and battery
+reporting are implemented but untested on real hardware (no button wired, no
+divider fitted yet).
