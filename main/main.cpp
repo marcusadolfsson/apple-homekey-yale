@@ -205,7 +205,9 @@ void setup() {
                               miscConfig.nfcIrqPin,
                               miscConfig.nfcVenPin,
                               miscConfig.hkAuthPrecomputeEnabled,
-                              miscConfig.nfcFastPollingEnabled);
+                              miscConfig.nfcFastPollingEnabled,
+                              miscConfig.relayDoorbellMac,
+                              miscConfig.relayLinkKey);
   nfcManager->begin();
 
   webServerManager.setNfcManager(nfcManager.get());

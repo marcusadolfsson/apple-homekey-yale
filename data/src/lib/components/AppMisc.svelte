@@ -490,6 +490,8 @@
 								bind:nfcPinsPreset={miscConfig.nfcPinsPreset}
 								nfcPresets={nfcPresetsList}
 								bind:nfcReaderType={miscConfig.nfcReaderType}
+								bind:relayDoorbellMac={miscConfig.relayDoorbellMac}
+								bind:relayLinkKey={miscConfig.relayLinkKey}
 								bind:nfcIrqPin={miscConfig.nfcIrqPin}
 								bind:nfcVenPin={miscConfig.nfcVenPin}
 								bind:ethernetEnabled={miscConfig.ethernetEnabled}

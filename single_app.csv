@@ -1,6 +1,9 @@
 # Name, Type, SubType, Offset, Size, Flags
 # Same NVS offset/size as with_ota.csv so HomeKit pairing and config survive.
-# OTA is dropped to fit the BLE stack: one 3.75 MB app instead of two 1.875 MB slots.
+# OTA is dropped to fit the BLE stack: one 2.875 MB app instead of two 1.875 MB slots.
+# The app is ~2.1 MB; the rest goes to the web UI, which needs well over 128 KB
+# (LittleFS silently truncates files that do not fit, and a half-written bundle
+# still renders - it just quietly drops whatever came after the cut).
 nvs,data,nvs,,0x10000,,
-factory,app,factory,0x20000,0x3C0000,,
-spiffs,data,spiffs,,0x20000,,
+factory,app,factory,0x20000,0x2E0000,,
+spiffs,data,spiffs,0x300000,0x100000,,

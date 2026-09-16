@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 /**
@@ -26,7 +27,8 @@
  */
 class RemoteNfcReader : public INfcReader {
 public:
-  explicit RemoteNfcReader(const std::array<uint8_t, 18> &ecpData);
+  RemoteNfcReader(const std::array<uint8_t, 18> &ecpData, const std::string &pinnedMac,
+                  const std::string &linkKey, bool fastPolling);
   ~RemoteNfcReader() override;
 
   bool init() override;
@@ -84,6 +86,11 @@ private:
   const std::array<uint8_t, 18> &m_ecpData;
   uint8_t m_doorbell[6] = {0};
   bool m_doorbellKnown = false;
+  std::array<uint8_t, 6> m_pinnedMac{};
+  bool m_pinned = false;              // only talk to m_pinnedMac
+  std::array<uint8_t, 16> m_pmk{}, m_lmk{};
+  bool m_encrypted = false;           // link key configured
+  bool macAllowed(const uint8_t mac[6]) const;
   uint8_t m_seq = 0;
 
   QueueHandle_t m_rx = nullptr;        // frames from the ESP-NOW callback
@@ -102,9 +109,22 @@ private:
   int8_t m_linkRssi = 0;  // of the last frame heard from the doorbell
   uint16_t m_batteryMv = 0;  // 0 = unknown (no divider fitted / USB powered)
   void noteBattery(const uint8_t *tail, size_t len);
-  static constexpr uint16_t POLL_INTERVAL_MS = 100;
+  // These mirror NfcManager::pollingTask() exactly, because the doorbell is
+  // running the same poll loop remotely. LISTEN_WINDOW_MS is how long the
+  // reader holds the field open waiting for a card: an iPhone needs most of
+  // that to see the ECP frame and put the Home Key up, so shortening it is what
+  // kills the tap animation. POLL_DELAY_MS is the quiet gap between cycles,
+  // which is the knob "fast polling" turns and the one a battery build raises.
+  static constexpr uint16_t LISTEN_WINDOW_MS = 500;
+  // Tighter than the base's own 100 ms: the doorbell's only job is polling,
+  // and a higher ECP rate is what gives an iPhone a chance to raise the Home
+  // Key during a brief tap. A battery build raises this again.
+  static constexpr uint16_t POLL_DELAY_MS = 20;
+  static constexpr uint16_t POLL_DELAY_FAST_MS = 5;
+  const bool m_fastPolling;
   static constexpr int64_t HEARTBEAT_TIMEOUT_MS = 90000;
   int64_t m_lastHeardUs = 0;
+  int64_t m_lastSilenceLogUs = 0;
   int64_t m_lastStatUs = 0;
   int64_t m_lastHelloUs = 0;
 

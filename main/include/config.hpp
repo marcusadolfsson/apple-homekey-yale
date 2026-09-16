@@ -196,6 +196,10 @@ namespace espConfig
     std::string yaleBleMac = "";
     uint8_t yaleBleSlot = 0;
     std::string yaleBleOfflineKey = "";  // secret: masked in the web API, never logged
+    // Relay link (reader type 4). Empty MAC = pair with whoever answers first.
+    // The key is 32 hex characters, printed once by the doorbell over USB.
+    std::string relayDoorbellMac = "";
+    std::string relayLinkKey = "";  // secret: masked in the web API, never logged
   };
   struct actions_config_t {
     enum colorMap

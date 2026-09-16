@@ -8,6 +8,8 @@
 		nfcPinsPreset: number;
 		nfcPresets: NfcGpioPinsPreset | null;
 		nfcReaderType: number;
+		relayDoorbellMac?: string;
+		relayLinkKey?: string;
 		nfcIrqPin: number;
 		nfcVenPin: number;
 		ethernetEnabled: boolean;
@@ -28,6 +30,8 @@
 		nfcPinsPreset = $bindable(),
 		nfcPresets,
 		nfcReaderType = $bindable(),
+		relayDoorbellMac = $bindable(),
+		relayLinkKey = $bindable(),
 		nfcIrqPin = $bindable(),
 		nfcVenPin = $bindable(),
 		ethernetEnabled = $bindable(),
@@ -128,6 +132,31 @@
 				<option value={4}>Relay (ESP-NOW doorbell)</option>
 			</select>
 		</div>
+		{#if isRelayReader}
+			<div class="form-control mb-2">
+				<label class="label" for="relayDoorbellMac">
+					<span class="label-text text-xs">Doorbell MAC (optional; empty pairs with the first to answer)</span>
+				</label>
+				<input id="relayDoorbellMac" type="text" bind:value={relayDoorbellMac}
+					placeholder="AA:BB:CC:DD:EE:FF" autocomplete="off"
+					class="input input-sm input-bordered w-full font-mono" disabled={loading} />
+			</div>
+			<div class="form-control mb-2">
+				<label class="label" for="relayLinkKey">
+					<span class="label-text text-xs">Link key (32 hex characters, printed by the doorbell over USB)</span>
+				</label>
+				<input id="relayLinkKey" type="password" bind:value={relayLinkKey}
+					placeholder="••••••••" autocomplete="off"
+					class="input input-sm input-bordered w-full font-mono" disabled={loading} />
+			</div>
+		{/if}
+		{#if isRelayReader}
+			<p class="text-xs opacity-60 mb-2">
+				The reader lives on the doorbell, so this board drives no NFC pins.
+				Its PN532 is wired on the doorbell itself (SDA&nbsp;GPIO22,
+				SCL&nbsp;GPIO23), which is why no pin settings are shown here.
+			</p>
+		{:else}
 		<div class="form-control mb-2">
 			<label class="label" for="nfcPreset">
 				<span class="label-text text-xs">Preset</span>
@@ -234,10 +263,15 @@
 				</div>
 			</div>
 		{/if}
+		{/if}
     <div class="flex items-center justify-between py-2 px-3 bg-base-200 rounded-lg">
       <div>
         <p class="text-sm font-medium">Fast NFC Polling</p>
-        <p class="text-xs text-base-content/60">Reduces the delay between poll cycles for quicker tag detection.</p>
+        <p class="text-xs text-base-content/60">
+          {isRelayReader
+            ? 'Shortens the doorbell’s listen window so it starts a new poll cycle more often. Costs power on a battery doorbell.'
+            : 'Reduces the delay between poll cycles for quicker tag detection.'}
+        </p>
       </div>
       <input
         type="checkbox"

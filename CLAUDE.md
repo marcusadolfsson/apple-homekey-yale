@@ -113,17 +113,36 @@ HA and the lock's own HomeKit module do that. A mortise nexTouch relocks itself.
 ## Relay protocol (`main/RelayProtocol.hpp`)
 
 ESP-NOW, 10-byte header, fragmented above 240 bytes, one request in flight.
-Unencrypted for now — see "Known issues".
+**Unicast is encrypted and both ends are pinned by MAC**; pairing broadcasts are
+in the clear because ESP-NOW cannot encrypt broadcast.
 
-- `Ping`/`Pong` — pairing, and it works from **either** side: the doorbell walks the
-  WiFi channels until a base answers, and a base with no doorbell advertises every
-  3 s. Either box can restart without breaking the link. No MAC is configured;
-  whoever answers first is adopted (trust on first contact).
-- `EcpReq`/`EcpSet` — the base hands the doorbell the 18-byte ECP frame and a poll
-  interval, so the doorbell can drive its own reader.
+- **Key sharing.** The doorbell generates a random 16-byte key on first boot,
+  keeps it in NVS (`relay/key`) and prints it **once over USB**. The user pastes it
+  into the base's web page (Hardware → Link key; masked on read-back, never logged).
+  Both sides derive PMK = SHA-256(key)[0:16], LMK = [16:32]. The key never crosses
+  the air. The doorbell pins the base's MAC on first contact (`relay/base`); the
+  base pins the doorbell from its config (`relayDoorbellMac`).
+- **Add the pinned peer before first contact — on both sides.** ESP-NOW only
+  decrypts a unicast from a peer already held with the matching LMK, and the first
+  frame from the other box is exactly what would tell you its MAC. Learning the peer
+  from that frame is a deadlock (it happened twice, once per direction). A link key
+  without a pinned MAC therefore cannot pair; the base warns about it.
+- `Ping`/`Pong` — pairing, from **either** side: the doorbell walks the WiFi
+  channels until a base answers, a base with no doorbell advertises every 3 s.
+  **Pinning must not skip channel discovery**: the base sits on its AP's channel,
+  which moved four times in one evening (13 → 6 → 7 → 1). The doorbell caches the
+  last good channel (`relay/chan`) and tries it first, and re-scans after 30 s of
+  silence.
+- `EcpReq`/`EcpSet` — the base hands the doorbell the 18-byte ECP frame plus the
+  **listen window (500 ms) and the gap between cycles (20 ms; 5 with "fast
+  polling")**, mirroring `NfcManager::pollingTask()`. Measured ECP rate 15.2 Hz.
 - **`TagEvent`** — the doorbell announces a card. **The base sends nothing between
   taps**: polling was inverted so a battery doorbell can sleep and so the radio is
-  free for BLE. The doorbell holds the card until `ReleaseReq` (or 5 s).
+  free for BLE. The announcement is **repeated up to 4× at 250 ms** until an APDU
+  arrives — it is the one frame a tap cannot afford to lose, and at −67 dBm a
+  single frame went missing often enough to cost whole taps. The doorbell holds the
+  card until `ReleaseReq` (or 5 s). Every doorbell frame carries the reader-ready
+  bit in its flags; the base tracks it continuously.
 - `ApduReq/Rsp`, `PresentReq/Rsp`, `ReleaseReq/Rsp` — the transaction itself.
 - `HealthRsp` — unsolicited heartbeat every 30 s; liveness is inferred from traffic
   received rather than polled for (`HEARTBEAT_TIMEOUT_MS`).
@@ -151,7 +170,23 @@ request/response replies made the polling wait swallow them.
   802.15.4 RX 74 mA, WiFi RX 78 mA — receive costs are near-identical, so link
   choice matters far less than time spent awake.
 - **PN532 V3** over I2C: VCC→**3V3** (its pull-ups follow VCC and the C6 is not 5 V
-  tolerant), SDA→D4 (GPIO22), SCL→D5 (GPIO23), DIP switches to I2C.
+  tolerant), SDA→D4 (GPIO22), SCL→D5 (GPIO23), DIP switches to I2C. 5 V on VCC was
+  tried for a stronger field: no change to Express mode, and the rewiring caused
+  reboots. A hung PN532 holds SDA low (`clear bus failed`, `I2C scan: no devices`)
+  and **esptool's reset does not power-cycle it** — unplug the board's USB.
+
+### Express mode (the tap-without-Wallet animation) — hard-won
+
+`Pn532Reader::healthCheck()` writes **CIU_BitFraming (`0x633D`) = 0 before every
+poll**. It reads like a liveness probe; it is not. Anticollision sends REQA/WUPA as
+7-bit short frames and can leave `TxLastBits = 7`, so the next `InCommunicateThru`
+sends the ECP frame's last byte as 7 bits, the iPhone fails the CRC and ignores it.
+Symptom: taps only work with the Home Key opened in Wallet; the frame looks perfect
+from the host (header, reader GID, CRC all verified), encryption/supply/rate are
+innocent. The doorbell now does that write in `pollOnce()` before the ECP transmit.
+It broke when polling was inverted (the base stopped sending `HealthReq`, which had
+been doing the write for it) — not when encryption landed, though both were the
+same evening.
 - **ST25R3916** is the intended production reader: ~3 µA wake-up (low-power card
   detection) versus a PN532 that costs milliamps just to look for a card.
 - Reader type 0 = PN532 SPI (upstream defaults SS=18/MOSI=19/MISO=20/SCK=21),
@@ -165,17 +200,24 @@ idf.py set-target esp32c6 && idf.py build          # base firmware
 cd relay-doorbell && idf.py build                  # doorbell firmware
 ```
 
-The app outgrew the two-slot OTA layout (2.1 MB), so `single_app.csv` gives it one
-3.75 MB partition: **OTA is disabled; flash over USB.** To keep pairing, keys and
-settings, flash the parts individually and never the merged image:
+The app outgrew the two-slot OTA layout (2.2 MB), so `single_app.csv` gives it one
+2.875 MB app partition and **1 MB for the web UI at `0x300000`**: **OTA is
+disabled; flash over USB.** To keep pairing, keys and settings, flash the parts
+individually and never the merged image:
 
 ```bash
 esptool --chip esp32c6 -p PORT write_flash \
   0x0 build/bootloader/bootloader.bin \
   0x8000 build/partition_table/partition-table.bin \
   0x20000 build/HomeKey-ESP32.bin \
-  0x3e0000 build/spiffs.bin        # NVS at 0x9000 is untouched
+  0x300000 build/spiffs.bin        # NVS at 0x9000 is untouched
 ```
+
+**Do not shrink the UI partition.** The UI is ~120 KB; with a 128 KB partition
+LittleFS silently truncated every file (`components.js` served 9,956 of 45,799
+bytes) and the page *still rendered* from a browser cache — new fields simply never
+appeared. If a UI change "doesn't show up", compare served sizes against
+`data/dist/assets/*.gz` before debugging the Svelte.
 
 **Back up NVS (`0x9000`, length `0x10000`) before repurposing a board** — reflashing
 a board with different firmware erases the HomeKit pairing, HomeKey keys, WiFi
@@ -195,12 +237,19 @@ which is *not encrypted* — enable flash encryption before deploying.
 
 ## Known issues / next steps
 
-1. **The relay link is unencrypted and unauthenticated, and pairing is trust-on-
-   first-contact.** No MAC is configured, so any ESP-NOW device in range can claim
-   to be the doorbell. It cannot forge an unlock (the base verifies the phone
-   cryptographically) but it can disrupt. Next: an optional "Doorbell MAC" setting
-   plus encrypted ESP-NOW peers with a shared key.
-2. **Lock sharing.** The lock accepts very few simultaneous BLE connections, and
+1. **Lock state is not tracked.** `GETSTATUS` replies are logged, not parsed; the
+   MQTT lock state is HomeSpan's optimistic virtual state, and there is no `lock`
+   command route (the opcode is implemented). Home Assistant's `yalexs_ble` proxy is
+   still the only thing that knows the lock's true state, including keypad and
+   manual operations, because it parses BLE advertisements passively — we connect on
+   demand and drop the link after 5 s. Replacing the proxy means (a) parse status
+   and publish it, route `lock`, report the unlock result; then (b) passive
+   advertisement scanning, which must be measured against tap latency first: one
+   radio, and continuous BLE RX cost 3–4× on connect time when tried via WiFi PS.
+2. **The base follows its AP's channel** and the AP roams; a tap in the ~30 s
+   before the doorbell re-scans is lost. If that is common, add a send-failure
+   callback on the doorbell so it re-scans in a second rather than thirty.
+3. **Lock sharing.** The lock accepts very few simultaneous BLE connections, and
    Home Assistant connects to refresh state after each unlock. At normal tap spacing
    and range this costs at most a retry; if collisions appear in daily use, the fix
    is for HA to take front-door state from this reader over MQTT and stop connecting
@@ -209,23 +258,30 @@ which is *not encrypted* — enable flash encryption before deploying.
    at once, and unlocks cannot be attributed to a person. The reader should get its
    own slot — create a dedicated account, invite it to the lock, open the lock with
    it once over Bluetooth in person so the key is *loaded*, then extract key and slot.
-3. **Relay round trips run 28–160 ms**, above ESP-NOW's usual 5–15 ms; the largest
+4. **Relay round trips run 28–160 ms**, above ESP-NOW's usual 5–15 ms; the largest
    is the iPhone's own crypto rather than the link. Against a directly attached
    reader the relay adds ~40 ms to a whole transaction, so this is low priority.
-4. **Still to do for a battery doorbell:** ST25R3916 in place of the PN532 (its
+5. **Still to do for a battery doorbell:** ST25R3916 in place of the PN532 (its
    low-power card detection is the ~3 µA that makes idling possible), deep sleep
    between taps with wake on the reader's IRQ and on the button, and a measurement
    with a Nordic PPK2 rather than an estimate.
-5. Diagnostics still compiled in: I2C bus scan, BLE scan reports, relay statistics.
-6. **Web UI authentication is off by default**; turn it on before leaving a device
-   running. Also enable flash encryption — the lock's offline key sits in plain NVS.
-7. The doorbell's USB console goes quiet after a reset until the port re-enumerates;
-   reopen the port rather than assuming the board has crashed.
+6. Diagnostics still compiled in: I2C bus scan, BLE scan reports, relay statistics,
+   the doorbell's poll-cycle rate (every 1000 cycles) and the ECP frame on push.
+7. **Web UI authentication is off by default**; turn it on before leaving a device
+   running. Also enable flash encryption — the lock's offline key and the relay
+   link key sit in plain NVS.
+8. The doorbell's USB console goes quiet after a reset until the port re-enumerates;
+   reopen the port rather than assuming the board has crashed. Unplugging USB also
+   kills any serial capture that was attached.
 
 ## Status
 
-Working end to end: iPhone Home Key tap on the doorbell → relayed over ESP-NOW →
-base authenticates → Yale unlocks over BLE, ~3.2 s next to the lock. Both boards
-recover pairing on their own after either restarts. Doorbell button and battery
-reporting are implemented but untested on real hardware (no button wired, no
-divider fitted yet).
+Working end to end (2026-09-16): iPhone Home Key **Express** tap on the doorbell
+(phone locked, no Wallet) → relayed over encrypted, MAC-pinned ESP-NOW → base
+authenticates in ~190 ms → Yale unlocks over BLE, ~3.2 s next to the lock. Both
+boards recover pairing on their own after either restarts or the AP changes
+channel. Dashboard shows pairing, link RSSI, reader-ready and doorbell battery;
+MQTT publishes the button and battery with HA discovery. Doorbell button and
+battery divider are implemented but untested on real hardware (no button wired,
+no divider fitted yet). HA's `yalexs_ble` stays enabled for lock *state*; this
+device does the *commands*.

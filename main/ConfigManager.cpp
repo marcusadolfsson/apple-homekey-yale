@@ -59,6 +59,8 @@ ConfigManager::ConfigManager() : m_isInitialized(false) {
       {"lockTStateCmd", &m_mqttConfig.lockTStateCmd},
       {"btrLvlCmdTopic", &m_mqttConfig.btrLvlCmdTopic},
       {"hkAltActionTopic", &m_mqttConfig.hkAltActionTopic},
+      {"doorbellTopic", &m_mqttConfig.doorbellTopic},
+      {"doorbellBatteryTopic", &m_mqttConfig.doorbellBatteryTopic},
       {"lockCustomStateTopic", &m_mqttConfig.lockCustomStateTopic},
       {"lockCustomStateCmd", &m_mqttConfig.lockCustomStateCmd},
       {"lockEnableCustomState", &m_mqttConfig.lockEnableCustomState},
@@ -117,7 +119,9 @@ ConfigManager::ConfigManager() : m_isInitialized(false) {
       {"yaleBleEnabled", &m_miscConfig.yaleBleEnabled},
       {"yaleBleMac", &m_miscConfig.yaleBleMac},
       {"yaleBleSlot", &m_miscConfig.yaleBleSlot},
-      {"yaleBleOfflineKey", &m_miscConfig.yaleBleOfflineKey}
+      {"yaleBleOfflineKey", &m_miscConfig.yaleBleOfflineKey},
+      {"relayDoorbellMac", &m_miscConfig.relayDoorbellMac},
+      {"relayLinkKey", &m_miscConfig.relayLinkKey}
     }
     },
     {
@@ -872,7 +876,7 @@ std::string ConfigManager::serializeToJson() {
                 using PointeeType = std::remove_pointer_t<T>;
 
                 if constexpr (std::is_same_v<PointeeType, std::string>) {
-                    if(key.contains("Password") || key.contains("Passwd") || key == "yaleBleOfflineKey"){
+                    if(key.contains("Password") || key.contains("Passwd") || key == "yaleBleOfflineKey" || key == "relayLinkKey"){
                         cJSON_AddStringToObject(root.get(), key.c_str(), "********");
                     } else {
                         cJSON_AddStringToObject(root.get(), key.c_str(), arg->c_str());

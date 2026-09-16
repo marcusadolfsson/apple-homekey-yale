@@ -322,6 +322,32 @@
                   required
                 />
               </div>
+              <div class="form-control">
+                <!-- svelte-ignore a11y_label_has_associated_control -->
+                <label class="label">
+                  <span class="label-text text-sm">Doorbell Button Topic</span>
+                </label>
+                <input
+                  type="text"
+                  bind:value={mqttConfig.doorbellTopic}
+                  placeholder="homekey/doorbell"
+                  class="input input-sm input-bordered w-full"
+                  required
+                />
+              </div>
+              <div class="form-control">
+                <!-- svelte-ignore a11y_label_has_associated_control -->
+                <label class="label">
+                  <span class="label-text text-sm">Doorbell Battery Topic</span>
+                </label>
+                <input
+                  type="text"
+                  bind:value={mqttConfig.doorbellBatteryTopic}
+                  placeholder="homekey/doorbell/battery"
+                  class="input input-sm input-bordered w-full"
+                  required
+                />
+              </div>
             </div>
 
             <!-- Ignore NFC Tags Toggle -->

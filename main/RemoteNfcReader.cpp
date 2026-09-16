@@ -11,27 +11,78 @@
 #include "esp_wifi.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <string>
+
+#include "mbedtls/sha256.h"
 
 RemoteNfcReader *RemoteNfcReader::s_instance = nullptr;
 
 namespace {
 const uint8_t BROADCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-bool addPeer(const uint8_t mac[6]) {
+bool addPeer(const uint8_t mac[6], const uint8_t *lmk = nullptr) {
   if (esp_now_is_peer_exist(mac)) return true;
   esp_now_peer_info_t p{};
   std::memcpy(p.peer_addr, mac, 6);
   p.channel = 0;  // whatever channel the STA is on
   p.ifidx = WIFI_IF_STA;
-  p.encrypt = false;
+  // Broadcast peers must stay in the clear; unicast peers are encrypted when a
+  // link key is configured.
+  const bool broadcast = std::all_of(mac, mac + 6, [](uint8_t b) { return b == 0xFF; });
+  p.encrypt = lmk != nullptr && !broadcast;
+  if (p.encrypt) std::memcpy(p.lmk, lmk, 16);
   return esp_now_add_peer(&p) == ESP_OK;
 }
 }  // namespace
 
-RemoteNfcReader::RemoteNfcReader(const std::array<uint8_t, 18> &ecpData) : m_ecpData(ecpData) {
+namespace {
+bool parseHexBytes(const std::string &s, uint8_t *out, size_t n) {
+  std::string hex;
+  for (char c : s) if (c != ':' && c != '-' && c != ' ') hex.push_back(c);
+  if (hex.size() != n * 2) return false;
+  for (size_t i = 0; i < n; ++i) {
+    auto nib = [](char c) -> int {
+      if (c >= '0' && c <= '9') return c - '0';
+      c = char(std::tolower(static_cast<unsigned char>(c)));
+      if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+      return -1;
+    };
+    int hi = nib(hex[2 * i]), lo = nib(hex[2 * i + 1]);
+    if (hi < 0 || lo < 0) return false;
+    out[i] = uint8_t(hi << 4 | lo);
+  }
+  return true;
+}
+}  // namespace
+
+RemoteNfcReader::RemoteNfcReader(const std::array<uint8_t, 18> &ecpData, const std::string &pinnedMac,
+                                 const std::string &linkKey, bool fastPolling)
+    : m_ecpData(ecpData), m_fastPolling(fastPolling) {
   s_instance = this;
+  if (!pinnedMac.empty()) {
+    m_pinned = parseHexBytes(pinnedMac, m_pinnedMac.data(), 6);
+    if (!m_pinned) ESP_LOGE(TAG, "doorbell MAC '%s' is not valid; accepting any doorbell", pinnedMac.c_str());
+  }
+  if (!linkKey.empty()) {
+    std::array<uint8_t, 16> key{};
+    if (parseHexBytes(linkKey, key.data(), 16)) {
+      // One typed key, split deterministically into the two ESP-NOW keys.
+      uint8_t digest[32];
+      mbedtls_sha256(key.data(), key.size(), digest, 0);
+      std::copy_n(digest, 16, m_pmk.begin());
+      std::copy_n(digest + 16, 16, m_lmk.begin());
+      m_encrypted = true;
+    } else {
+      ESP_LOGE(TAG, "relay link key must be 32 hex characters; link left unencrypted");
+    }
+  }
+}
+
+bool RemoteNfcReader::macAllowed(const uint8_t mac[6]) const {
+  if (!m_pinned) return true;
+  return std::equal(m_pinnedMac.begin(), m_pinnedMac.end(), mac);
 }
 
 RemoteNfcReader::~RemoteNfcReader() {
@@ -42,6 +93,7 @@ RemoteNfcReader::~RemoteNfcReader() {
 void RemoteNfcReader::recvTrampoline(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
   auto *self = s_instance;
   if (!self || !self->m_rx || len < (int)relay::HDR) return;
+  if (!self->macAllowed(info->src_addr)) return;
   Msg m{};
   if (info->rx_ctrl) self->m_linkRssi = info->rx_ctrl->rssi;
   self->m_lastHeardUs = esp_timer_get_time();
@@ -70,7 +122,28 @@ bool RemoteNfcReader::init() {
     return false;
   }
   esp_now_register_recv_cb(recvTrampoline);
-  addPeer(BROADCAST);
+  if (m_encrypted) {
+    esp_err_t kerr = esp_now_set_pmk(m_pmk.data());
+    if (kerr != ESP_OK) {
+      ESP_LOGE(TAG, "esp_now_set_pmk failed: %s; link left unencrypted", esp_err_to_name(kerr));
+      m_encrypted = false;
+    }
+  }
+  ESP_LOGI(TAG, "relay link: %s, doorbell %s", m_encrypted ? "encrypted" : "unencrypted",
+           m_pinned ? "pinned by MAC" : "unpinned (first to answer)");
+  addPeer(BROADCAST);  // pairing frames cannot be encrypted
+  if (m_encrypted) {
+    if (m_pinned) {
+      // ESP-NOW decrypts a unicast frame only if the sender is already a peer
+      // with the right LMK. The doorbell's first frame is what tells us its MAC,
+      // so without adding it up front that frame is dropped and pairing can
+      // never happen. The pinned MAC is exactly what lets us add it early.
+      addPeer(m_pinnedMac.data(), m_lmk.data());
+    } else {
+      ESP_LOGW(TAG, "a link key without a doorbell MAC cannot pair: the doorbell's "
+                    "first frame is encrypted and gets dropped. Set the MAC too.");
+    }
+  }
   // Leave WiFi power save at its default. Forcing WIFI_PS_NONE keeps the WiFi
   // receiver on, which shares one radio with BLE and made connecting to the lock
   // 3-4x slower (1.9 s -> 4.8-8.0 s) while saving only ~10 ms of relay latency.
@@ -116,11 +189,14 @@ void RemoteNfcReader::rxTask() {
     if (h.magic0 != relay::MAGIC0 || h.magic1 != relay::MAGIC1 || h.version != relay::VERSION) continue;
 
     if (relay::Op(h.op) == relay::Op::Pong) {
-      addPeer(m.mac);
+      if (!macAllowed(m.mac)) continue;
+      addPeer(m.mac, m_encrypted ? m_lmk.data() : nullptr);
+      // Every frame from the doorbell carries its reader state, so keep it
+      // current rather than only sampling it the first time we see it.
+      m_readerReady = (h.flags & 2) != 0;
       if (!m_doorbellKnown) {
         std::memcpy(m_doorbell, m.mac, 6);
         m_doorbellKnown = true;
-        m_readerReady = (h.flags & 2) != 0;
         ESP_LOGI(TAG, "doorbell answered our hello: %02X:%02X:%02X:%02X:%02X:%02X", m_doorbell[0],
                  m_doorbell[1], m_doorbell[2], m_doorbell[3], m_doorbell[4], m_doorbell[5]);
         sendEcp();
@@ -128,13 +204,18 @@ void RemoteNfcReader::rxTask() {
       continue;
     }
     if (relay::Op(h.op) == relay::Op::Ping) {
-      // A doorbell is looking for a base: answer, and adopt the first one.
-      addPeer(m.mac);
+      // A doorbell is looking for a base: answer, and adopt it if allowed.
+      if (!macAllowed(m.mac)) {
+        ESP_LOGW(TAG, "ignoring ping from %02X:%02X:%02X:%02X:%02X:%02X (not the pinned doorbell)",
+                 m.mac[0], m.mac[1], m.mac[2], m.mac[3], m.mac[4], m.mac[5]);
+        continue;
+      }
+      addPeer(m.mac, m_encrypted ? m_lmk.data() : nullptr);
       send(m.mac, relay::Op::Pong, h.seq, 0, nullptr, 0);
+      m_readerReady = (h.flags & 2) != 0;
       if (!m_doorbellKnown) {
         std::memcpy(m_doorbell, m.mac, 6);
         m_doorbellKnown = true;
-        m_readerReady = (h.flags & 2) != 0;
         ESP_LOGI(TAG, "doorbell paired: %02X:%02X:%02X:%02X:%02X:%02X", m_doorbell[0], m_doorbell[1],
                  m_doorbell[2], m_doorbell[3], m_doorbell[4], m_doorbell[5]);
         sendEcp();
@@ -183,7 +264,7 @@ void RemoteNfcReader::rxTask() {
 
 void RemoteNfcReader::send(const uint8_t mac[6], relay::Op op, uint8_t seq, uint8_t flags,
                            const uint8_t *payload, size_t len) {
-  addPeer(mac);
+  addPeer(mac, m_encrypted ? m_lmk.data() : nullptr);
   const size_t fragCnt = len == 0 ? 1 : (len + relay::MAX_PAYLOAD - 1) / relay::MAX_PAYLOAD;
   for (size_t i = 0; i < fragCnt; ++i) {
     uint8_t frame[relay::MAX_ESPNOW];
@@ -265,7 +346,7 @@ bool RemoteNfcReader::pollForTag(std::vector<uint8_t> &uid, std::array<uint8_t, 
 void RemoteNfcReader::noteBattery(const uint8_t *tail, size_t len) {
   if (len < 2) return;
   const uint16_t mv = uint16_t(tail[len - 2]) | uint16_t(tail[len - 1]) << 8;
-  if (mv == 0 || mv > 6000) return;  // 0 = no divider fitted
+  if (mv < 2500 || mv > 6000) return;  // below this there is no battery, just a floating pin
   const bool firstReport = m_batteryMv == 0;
   const bool moved = m_batteryMv && (mv > m_batteryMv + 50 || mv + 50 < m_batteryMv);
   m_batteryMv = mv;
@@ -283,10 +364,17 @@ void RemoteNfcReader::noteBattery(const uint8_t *tail, size_t len) {
 
 void RemoteNfcReader::sendEcp() {
   if (!m_doorbellKnown) return;
-  uint8_t payload[20];
+  uint8_t payload[22];
   std::memcpy(payload, m_ecpData.data(), 18);
-  const uint16_t interval = POLL_INTERVAL_MS;
-  std::memcpy(payload + 18, &interval, 2);
+  const uint16_t listen = LISTEN_WINDOW_MS;
+  const uint16_t delayMs = m_fastPolling ? POLL_DELAY_FAST_MS : POLL_DELAY_MS;
+  std::memcpy(payload + 18, &listen, 2);
+  std::memcpy(payload + 20, &delayMs, 2);
+  {
+    char hex[3 * 18 + 1];
+    for (int i = 0; i < 18; ++i) snprintf(hex + 3 * i, 4, "%02X ", m_ecpData[i]);
+    ESP_LOGI(TAG, "pushing ECP frame: %s", hex);
+  }
   send(m_doorbell, relay::Op::EcpSet, ++m_seq, 0, payload, sizeof(payload));
 }
 
@@ -337,11 +425,24 @@ bool RemoteNfcReader::healthCheck() {
   // liveness comes from the doorbell's own heartbeat rather than from a poll of
   // ours. Asking over the air would defeat the point of the inversion (and the
   // reply raced the tap-announcement wait).
+  //
+  // Pn532Reader::healthCheck() is not just a probe: it writes CIU_BitFraming
+  // (0x633D) = 0 before every poll, and without that the ECP frame can go out
+  // with a 7-bit last byte and Express mode silently stops. When this used to
+  // send HealthReq each cycle the doorbell did that write for us; now the
+  // doorbell does it itself in pollOnce(). Do not "restore" the request here.
   if (!m_doorbellKnown) return true;
   const int64_t silentMs = (esp_timer_get_time() - m_lastHeardUs) / 1000;
   if (silentMs > HEARTBEAT_TIMEOUT_MS) {
-    ESP_LOGW(TAG, "no word from the doorbell for %lld s", silentMs / 1000);
-    return false;
+    // Report healthy even so. Returning false makes NfcManager tear the reader
+    // down and rebuild it immediately, and with a doorbell that is simply out of
+    // range or unpowered that becomes a tight loop which floods the log and
+    // starves the web socket. A missing doorbell is shown in the UI instead.
+    const int64_t now = esp_timer_get_time();
+    if (now - m_lastSilenceLogUs > 30000000) {
+      m_lastSilenceLogUs = now;
+      ESP_LOGW(TAG, "no word from the doorbell for %lld s", silentMs / 1000);
+    }
   }
   return true;
 }

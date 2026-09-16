@@ -50,6 +50,10 @@ export interface MqttConfig {
   btrLvlCmdTopic: string;
   /** HomeKey alternate action topic */
   hkAltActionTopic: string;
+  /** Doorbell button press topic (relay doorbell) */
+  doorbellTopic: string;
+  /** Doorbell battery voltage topic, in mV (relay doorbell) */
+  doorbellBatteryTopic: string;
   /** Custom lock state topic */
   lockCustomStateTopic: string;
   /** Custom lock state command topic */
@@ -149,6 +153,10 @@ export interface MiscConfig {
   yaleBleSlot?: number;
   /** Yale offline key, 32 hex chars. Write-only: the API returns ******** */
   yaleBleOfflineKey?: string;
+  /** Relay: pin the doorbell by MAC (empty = pair with the first to answer) */
+  relayDoorbellMac?: string;
+  /** Relay: 32-hex link key printed by the doorbell. Write-only */
+  relayLinkKey?: string;
   /** Force lock to always lock (overrides normal behavior) */
   lockAlwaysLock: boolean;
   /** Enable HomeKey auth precompute cache (faster taps, higher CPU/RAM) */

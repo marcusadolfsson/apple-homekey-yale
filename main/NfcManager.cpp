@@ -79,12 +79,16 @@ NfcManager::NfcManager(NvsCredentialStore& readerDataManager,
                        uint8_t nfcIrqPin,
                        uint8_t nfcVenPin,
                        bool hkAuthPrecomputeEnabled,
-                       bool nfcFastPollingEnabled)
+                       bool nfcFastPollingEnabled,
+                       const std::string& relayDoorbellMac,
+                       const std::string& relayLinkKey)
     : nfcGpioPins(nfcGpioPins),
       m_nfcReaderType(nfcReaderType),
       m_nfcIrqPin(nfcIrqPin),
       m_nfcVenPin(nfcVenPin),
       m_readerDataManager(readerDataManager),
+      m_relayDoorbellMac(relayDoorbellMac),
+      m_relayLinkKey(relayLinkKey),
       m_hkAuthPrecomputeEnabled(hkAuthPrecomputeEnabled),
       m_nfcFastPollingEnabled(nfcFastPollingEnabled),
       m_pollingTaskHandle(nullptr),
@@ -202,7 +206,8 @@ bool NfcManager::begin() {
         ESP_LOGI(TAG, "Using PN532 reader (I2C)");
     } else if (m_nfcReaderType == RELAY_ESPNOW) {
         // No local NFC hardware: a remote doorbell owns the reader.
-        m_reader = std::make_unique<RemoteNfcReader>(m_ecpData);
+        m_reader = std::make_unique<RemoteNfcReader>(m_ecpData, m_relayDoorbellMac, m_relayLinkKey,
+                                                     m_nfcFastPollingEnabled);
         ESP_LOGI(TAG, "Using relay reader (ESP-NOW doorbell)");
     } else {
     	ESP_LOGE(TAG, "Unsupported NFC reader type: %u", m_nfcReaderType);

@@ -35,7 +35,9 @@ public:
                uint8_t nfcIrqPin,
                uint8_t nfcVenPin,
                bool hkAuthPrecomputeEnabled,
-               bool nfcFastPollingEnabled);
+               bool nfcFastPollingEnabled,
+               const std::string& relayDoorbellMac = "",
+               const std::string& relayLinkKey = "");
     /**
      * `@brief` Destructor.
      *
@@ -73,6 +75,8 @@ private:
     std::unique_ptr<INfcReader> m_reader;
 
     NvsCredentialStore& m_readerDataManager;
+    std::string m_relayDoorbellMac;
+    std::string m_relayLinkKey;
     bool m_hkAuthPrecomputeEnabled = false;
     const bool m_nfcFastPollingEnabled;
 
