@@ -4,9 +4,10 @@
 //
 // Test build: the radio stays awake (we are measuring latency, not power) and
 // the link is unencrypted.
-#include "Pn532I2cTransport.hpp"
+#include "DoorbellPn532Reader.hpp"
+#include "NfcReader.hpp"
 #include "RelayProtocol.hpp"
-#include "pn532_cxx/pn532.hpp"
+#include "St25r3916Reader.hpp"
 
 #include "driver/gpio.h"
 #include "esp_adc/adc_cali.h"
@@ -61,9 +62,17 @@ uint8_t g_base[6] = {0};
 bool g_baseKnown = false;
 uint8_t g_channel = 0;
 
-Pn532I2cTransport *g_transport = nullptr;
-pn532::Frontend *g_pn532 = nullptr;
-bool g_pn532Ready = false;
+// Which NFC front end is wired up. Compile-time default, overridable from NVS
+// (namespace "relay", u8 "reader") so a board can be switched without a rebuild.
+// Both sit on the same I2C pins; only the ST25R3916 has an IRQ line (D2) and the
+// low-power card detection a battery build needs.
+enum class ReaderKind : uint8_t { Pn532 = 0, St25r3916 = 1 };
+#ifndef DOORBELL_DEFAULT_READER
+#define DOORBELL_DEFAULT_READER 0
+#endif
+ReaderKind g_readerKind = ReaderKind(DOORBELL_DEFAULT_READER);
+INfcReader *g_reader = nullptr;
+bool g_readerReady = false;
 int64_t g_lastInitTryUs = 0;
 uint32_t g_polls = 0;
 // Inverted polling state: the doorbell drives its own reader once the base has
@@ -258,31 +267,27 @@ void send(const uint8_t mac[6], relay::Op op, uint8_t seq, uint8_t flags,
 
 // ---------------------------------------------------------------- PN532
 
-bool pn532Init() {
-  if (!g_transport) g_transport = new Pn532I2cTransport(PIN_SDA, PIN_SCL);
-  if (!g_pn532) g_pn532 = new pn532::Frontend(*g_transport);
-  if (g_pn532->begin() != pn532::Status::SUCCESS) ESP_LOGW(TAG, "PN532 begin reported an error");
-  auto ver = g_pn532->GetFirmwareVersion();
-  if (!ver) {
-    ESP_LOGE(TAG, "no PN532 found on SDA=%d SCL=%d", PIN_SDA, PIN_SCL);
-    return false;
+bool readerInit() {
+  if (!g_reader) {
+    if (g_readerKind == ReaderKind::St25r3916) {
+      // Same 4-pin array the base uses: [0] = SDA, [1] = SCL.
+      g_reader = new St25r3916Reader({uint8_t(PIN_SDA), uint8_t(PIN_SCL), 255, 255}, g_ecp);
+      ESP_LOGI(TAG, "reader: ST25R3916 on SDA=%d SCL=%d", PIN_SDA, PIN_SCL);
+    } else {
+      g_reader = new DoorbellPn532Reader(PIN_SDA, PIN_SCL, g_ecp);
+      ESP_LOGI(TAG, "reader: PN532 on SDA=%d SCL=%d", PIN_SDA, PIN_SCL);
+    }
   }
-  ESP_LOGI(TAG, "PN532 firmware %d.%d", int((*ver >> 24) & 0xFF), int((*ver >> 16) & 0xFF));
-  g_pn532Ready = true;
-  // Same setup the base's own PN532 driver uses.
-  g_pn532->RFConfiguration(0x01, {0x03});
-  g_pn532->setPassiveActivationRetries(0);
-  g_pn532->RFConfiguration(0x02, {0x00, 0x0B, 0x10});
-  g_pn532->RFConfiguration(0x04, {0xFF});
-  return true;
+  g_readerReady = g_reader->init() && g_reader->beginDiscovery();
+  return g_readerReady;
 }
 
 // Poll our own reader once; announce to the base if a card is there.
 void pollOnce() {
-  if (!g_pn532Ready) {
+  if (!g_readerReady) {
     if (esp_timer_get_time() - g_lastInitTryUs > 5000000) {
       g_lastInitTryUs = esp_timer_get_time();
-      pn532Init();
+      readerInit();
     }
     return;
   }
@@ -291,41 +296,10 @@ void pollOnce() {
   // fire-and-forget (nothing answers it), but a transport-level failure here is
   // invisible except as "taps only work with the key open in Wallet", so report
   // a status change rather than discarding it.
-  // Reset CIU_BitFraming (0x633D) before the raw ECP transmit. Anticollision
-  // sends REQA/WUPA as 7-bit short frames and can leave TxLastBits = 7, which
-  // makes InCommunicateThru send the ECP frame's last byte as 7 bits: the phone
-  // fails the CRC and ignores it, so Express mode never triggers while a
-  // deliberate Wallet tap still works. The base's Pn532Reader does this write
-  // every cycle inside healthCheck(); the inverted-polling doorbell must too.
-  (void)g_pn532->WriteRegister({0x63, 0x3d, 0x00});
-  const int64_t ecpStart = esp_timer_get_time();
-  // Nothing ever answers an ECP frame, so the whole timeout is dead time in
-  // every cycle. 50 ms of a 175 ms cycle was holding the rate down to 5.7 Hz.
-  const auto ecpStatus = g_pn532->InCommunicateThru(g_ecp, res, 20);
-  const int64_t ecpDone = esp_timer_get_time();
-  static int lastEcpStatus = -1;
-  if (int(ecpStatus) != lastEcpStatus) {
-    lastEcpStatus = int(ecpStatus);
-    ESP_LOGI(TAG, "ECP transmit status now %d", lastEcpStatus);
-  }
-  // How often the phone actually sees an ECP frame is the whole game for a
-  // background tap, so measure the cycle rather than assuming it.
-  static int64_t lastCycleUs = 0, sumEcp = 0, sumCycle = 0;
-  static int cycles = 0;
-  if (lastCycleUs) { sumCycle += ecpStart - lastCycleUs; sumEcp += ecpDone - ecpStart; ++cycles; }
-  lastCycleUs = ecpStart;
-  if (cycles == 1000) {
-    ESP_LOGI(TAG, "poll cycle: %lld ms avg (ECP transmit %lld ms of it) -> ECP at %.1f Hz",
-             sumCycle / cycles / 1000, sumEcp / cycles / 1000, 1000000.0 * cycles / double(sumCycle));
-    cycles = 0; sumCycle = 0; sumEcp = 0;
-  }
   std::vector<uint8_t> uid;
   std::array<uint8_t, 2> atqa{};
   uint8_t sak = 0;
-  if (g_pn532->InListPassiveTarget(0x00, uid, atqa, sak, g_listenMs) !=
-      pn532::Status::SUCCESS) {
-    return;
-  }
+  if (!g_reader->pollForTag(uid, atqa, sak, g_listenMs)) return;
   std::vector<uint8_t> out;
   out.push_back(uint8_t(uid.size()));
   out.insert(out.end(), uid.begin(), uid.end());
@@ -366,11 +340,11 @@ void checkButton() {
 }
 
 void handlePoll(const Msg &m, const relay::Header &h, const std::vector<uint8_t> &payload) {
-  if (!g_pn532Ready) {
+  if (!g_readerReady) {
     // Reader missing at boot: retry occasionally so a re-seated cable recovers.
     if (esp_timer_get_time() - g_lastInitTryUs > 5000000) {
       g_lastInitTryUs = esp_timer_get_time();
-      pn532Init();
+      readerInit();
     }
     send(m.mac, relay::Op::PollRsp, h.seq, 0, nullptr, 0);  // flags bit1 clear = reader not ready
     return;
@@ -383,14 +357,14 @@ void handlePoll(const Msg &m, const relay::Header &h, const std::vector<uint8_t>
     ecp.assign(payload.begin(), payload.begin() + 18);
     std::memcpy(&timeoutMs, payload.data() + 18, 4);
   }
-  std::vector<uint8_t> res;
-  if (!ecp.empty()) (void)g_pn532->InCommunicateThru(ecp, res, 50);
+  // Legacy base-driven path: the ECP frame arrives per request; the reader
+  // transmits whatever g_ecp holds, so drop it in there first.
+  if (!ecp.empty()) std::copy(ecp.begin(), ecp.end(), g_ecp.begin());
 
   std::vector<uint8_t> uid;
   std::array<uint8_t, 2> atqa{};
   uint8_t sak = 0;
-  const auto st = g_pn532->InListPassiveTarget(0x00, uid, atqa, sak, uint16_t(timeoutMs));
-  const bool found = st == pn532::Status::SUCCESS;
+  const bool found = g_reader->pollForTag(uid, atqa, sak, timeoutMs);
 
   std::vector<uint8_t> out;
   out.push_back(uint8_t(uid.size()));
@@ -411,9 +385,7 @@ void handleApdu(const Msg &m, const relay::Header &h, const std::vector<uint8_t>
   std::vector<uint8_t> apdu(payload.begin() + 4, payload.end());
   std::vector<uint8_t> recv;
   const int64_t t0 = esp_timer_get_time();
-  const auto st = g_pn532->InDataExchange(apdu, recv, uint16_t(timeoutMs));
-  const bool ok = st == pn532::Status::SUCCESS;
-  if (ok && recv.size() >= 2) recv.erase(recv.begin(), recv.begin() + 2);  // strip PN532 status
+  const bool ok = g_reader && g_reader->exchangeApdu(apdu, recv, timeoutMs);
   ESP_LOGD(TAG, "apdu %u -> %u bytes in %lld us", (unsigned)apdu.size(), (unsigned)recv.size(),
            esp_timer_get_time() - t0);
   send(m.mac, relay::Op::ApduRsp, h.seq, ok ? 1 : 0, recv.data(), recv.size());
@@ -423,7 +395,7 @@ void handle(const Msg &m, const relay::Header &h, const std::vector<uint8_t> &pa
   switch (relay::Op(h.op)) {
     case relay::Op::Ping:
       // A base is looking for a doorbell (it restarted, or we paired before it did).
-      send(m.mac, relay::Op::Pong, h.seq, g_pn532Ready ? 2 : 0, nullptr, 0);
+      send(m.mac, relay::Op::Pong, h.seq, g_readerReady ? 2 : 0, nullptr, 0);
       if (!g_baseKnown) {
         std::memcpy(g_base, m.mac, 6);
         g_baseKnown = true;
@@ -464,20 +436,17 @@ void handle(const Msg &m, const relay::Header &h, const std::vector<uint8_t> &pa
       break;
     case relay::Op::ApduReq: handleApdu(m, h, payload); break;
     case relay::Op::PresentReq: {
-      (void)g_pn532->InRelease(1);
-      std::vector<uint8_t> uid; std::array<uint8_t, 2> atqa{}; uint8_t sak = 0;
-      const bool present = g_pn532->InListPassiveTarget(0x00, uid, atqa, sak, 100) == pn532::Status::SUCCESS;
+      const bool present = g_reader && g_reader->isTagStillPresent();
       send(m.mac, relay::Op::PresentRsp, h.seq, present ? 1 : 0, nullptr, 0);
       break;
     }
     case relay::Op::ReleaseReq:
-      (void)g_pn532->InRelease(1);
-      (void)g_pn532->setPassiveActivationRetries(0);
+      if (g_reader) g_reader->releaseTag();
       g_tagActive = false;  // resume watching for the next card
       send(m.mac, relay::Op::ReleaseRsp, h.seq, 1, nullptr, 0);
       break;
     case relay::Op::HealthReq: {
-      const bool ok = g_pn532->WriteRegister({0x63, 0x3d, 0x0}) == pn532::Status::SUCCESS;
+      const bool ok = g_reader && g_reader->healthCheck();
       send(m.mac, relay::Op::HealthRsp, h.seq, ok ? 1 : 0, nullptr, 0);
       break;
     }
@@ -502,7 +471,7 @@ void findBase() {
       // Carry the reader state in the ping too: the base adopts us from this
       // frame, and otherwise it would show "reader not ready" until the first
       // heartbeat 30 s later.
-      send(BROADCAST, relay::Op::Ping, seq++, g_pn532Ready ? 2 : 0, nullptr, 0);
+      send(BROADCAST, relay::Op::Ping, seq++, g_readerReady ? 2 : 0, nullptr, 0);
       const int64_t until = esp_timer_get_time() + 250000;
       while (esp_timer_get_time() < until && !g_baseKnown) {
         Msg m{};
@@ -564,7 +533,16 @@ extern "C" void app_main() {
   // without it we ping forever and never hear the answer.
   if (g_basePinned) addPeer(g_base);
   g_rx = xQueueCreate(16, sizeof(Msg));
-  if (!pn532Init()) ESP_LOGE(TAG, "continuing without a working PN532");
+  {
+    // NVS override of the compiled default, so a re-wired board needs no rebuild.
+    nvs_handle_t h;
+    if (nvs_open("relay", NVS_READONLY, &h) == ESP_OK) {
+      uint8_t kind = 0;
+      if (nvs_get_u8(h, "reader", &kind) == ESP_OK && kind <= 1) g_readerKind = ReaderKind(kind);
+      nvs_close(h);
+    }
+  }
+  if (!readerInit()) ESP_LOGE(TAG, "continuing without a working NFC reader");
 
   findBase();
 
@@ -589,7 +567,7 @@ extern "C" void app_main() {
         g_lastHeartbeatUs = esp_timer_get_time();
         std::vector<uint8_t> hb;
         appendBattery(hb);
-        send(g_base, relay::Op::HealthRsp, 0, g_pn532Ready ? 2 : 0, hb.data(), hb.size());
+        send(g_base, relay::Op::HealthRsp, 0, g_readerReady ? 2 : 0, hb.data(), hb.size());
       }
       // Silence means the base restarted or its AP moved channel. This has to
       // run before the poll-and-continue below, or a polling doorbell never
@@ -626,7 +604,7 @@ extern "C" void app_main() {
       // missing, without cutting a slow transaction short.
       if (g_tagActive && esp_timer_get_time() - g_tagActiveUs > 2000000) {
         ESP_LOGW(TAG, "no release from the base 2 s after the tag; resuming polling");
-        (void)g_pn532->InRelease(1);
+        if (g_reader) g_reader->releaseTag();
         g_tagActive = false;
       }
       continue;

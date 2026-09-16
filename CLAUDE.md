@@ -211,6 +211,20 @@ been doing the write for it) — not when encryption landed, though both were th
 same evening.
 - **ST25R3916** is the intended production reader: ~3 µA wake-up (low-power card
   detection) versus a PN532 that costs milliamps just to look for a card.
+- **The doorbell carries both drivers** behind the base's `INfcReader`
+  (`relay-doorbell/main/DoorbellPn532Reader.hpp`, `St25r3916Reader.*` copied
+  verbatim from the base). Selection: compile default `DOORBELL_DEFAULT_READER`
+  (0 = PN532, 1 = ST25R3916), overridable from NVS `relay/reader` (u8). Both sit
+  on SDA→D4 (GPIO22), SCL→D5 (GPIO23); the ST25R3916 driver was written against
+  the M5Stack Unit NFC at I2C 0x50 and polls the chip's IRQ registers over I2C,
+  so it works with **no IRQ wire** — that only matters for deep-sleep wake.
+  - *M5Stack Unit NFC (bench):* Grove red→XIAO **5V** (USB only), black→GND,
+    white (SDA)→D4, yellow (SCL)→D5. No IRQ on the Grove connector.
+  - *MikroE NFC 4 Click (production, 57.15 × 25.4 mm):* 3.3V, GND, SDA→D4,
+    SCL→D5, **IRQ (INT pin)→D2 (GPIO2)** — a low-power pin, so it can wake the
+    C6 from deep sleep. Flip the `COMM SEL` SMD jumpers to I2C (ships in SPI).
+    Rejected: ELECHOUSE board (40.2 mm wide, cavity is 36), NFC 5 Click
+    (ST25R3918, a cut-down 3916 at the same price).
 - Reader type 0 = PN532 SPI (upstream defaults SS=18/MOSI=19/MISO=20/SCK=21),
   1 = PN7160, 2 = ST25R3916, **3 = PN532 I2C**, **4 = Relay (ESP-NOW doorbell)**.
 
