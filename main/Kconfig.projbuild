@@ -7,3 +7,19 @@ menu "Arduino subsystem serial logging"
     bool "Initialize serial logging for the Arduino subsystem and by extent for HomeSpan"
     default y
 endmenu
+
+menu "XIAO ESP32C6 antenna"
+    depends on IDF_TARGET_ESP32C6
+config XIAO_ESP32C6_RF_SWITCH
+    bool "Drive the Seeed XIAO ESP32C6 RF switch (GPIO3 low, GPIO14 selects antenna)"
+    default y
+    help
+        The XIAO ESP32C6 routes its antenna through an RF switch: GPIO3 low enables
+        it and GPIO14 picks the antenna. Seeed's Arduino board package sets both;
+        this firmware uses the generic esp32c6 variant, which leaves them floating
+        and the radio badly attenuated. Turn off on other ESP32-C6 boards.
+config XIAO_ESP32C6_EXTERNAL_ANTENNA
+    bool "Use the U.FL connector instead of the built-in ceramic antenna"
+    depends on XIAO_ESP32C6_RF_SWITCH
+    default n
+endmenu

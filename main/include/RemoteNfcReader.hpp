@@ -128,7 +128,9 @@ private:
   static constexpr uint16_t POLL_DELAY_MS = 20;
   static constexpr uint16_t POLL_DELAY_FAST_MS = 5;
   const bool m_fastPolling;
-  static constexpr int64_t HEARTBEAT_TIMEOUT_MS = 90000;
+  // A deep-sleeping doorbell heartbeats hourly (an awake one every 30 s), so
+  // silence only means trouble after a couple of missed hourly heartbeats.
+  static constexpr int64_t HEARTBEAT_TIMEOUT_MS = 3LL * 3600 * 1000;
   int64_t m_lastHeardUs = 0;
   int64_t m_lastSilenceLogUs = 0;
   int64_t m_lastHelloUs = 0;

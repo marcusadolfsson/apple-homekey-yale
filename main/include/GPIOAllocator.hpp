@@ -17,7 +17,10 @@
 
 #ifdef CONFIG_IDF_TARGET_ESP32C6
 inline constexpr uint8_t RESTRICTED_PINS[] = {
-  12, 13, 24, 25, 26, 28, 29, 30
+  12, 13, 24, 25, 26, 28, 29, 30,
+#ifdef CONFIG_XIAO_ESP32C6_RF_SWITCH
+  3, 14  // XIAO RF switch enable / antenna select (set in setup())
+#endif
 };
 inline constexpr uint8_t STRAPPING_PINS[] = {
   8, 9, 15,16, 17, 27

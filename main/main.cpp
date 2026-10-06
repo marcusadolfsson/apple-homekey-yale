@@ -120,6 +120,21 @@ void setup() {
   #ifdef CONFIG_IDF_TARGET_ESP32
   gpio_set_pull_mode(GPIO_NUM_3, GPIO_PULLUP_ONLY); // U0RXD idle-HIGH in case UART-bridge not present
   #endif
+  #ifdef CONFIG_XIAO_ESP32C6_RF_SWITCH
+  // XIAO ESP32C6: GPIO3 low enables the RF switch, GPIO14 picks the antenna
+  // (low = built-in ceramic, high = U.FL). Left floating, the radio is badly
+  // attenuated. Set before Wi-Fi/BLE/ESP-NOW start.
+  gpio_reset_pin(GPIO_NUM_3);
+  gpio_reset_pin(GPIO_NUM_14);
+  gpio_set_direction(GPIO_NUM_3, GPIO_MODE_OUTPUT);
+  gpio_set_direction(GPIO_NUM_14, GPIO_MODE_OUTPUT);
+  gpio_set_level(GPIO_NUM_3, 0);
+  #ifdef CONFIG_XIAO_ESP32C6_EXTERNAL_ANTENNA
+  gpio_set_level(GPIO_NUM_14, 1);
+  #else
+  gpio_set_level(GPIO_NUM_14, 0);
+  #endif
+  #endif
   #ifdef CONFIG_INIT_ARDU_SERIAL_LOGGING
   Serial.begin(115200);
   #endif

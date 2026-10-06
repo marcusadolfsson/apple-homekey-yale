@@ -497,9 +497,9 @@ bool RemoteNfcReader::healthCheck() {
     // range or unpowered that becomes a tight loop which floods the log and
     // starves the web socket. A missing doorbell is shown in the UI instead.
     const int64_t now = esp_timer_get_time();
-    if (now - m_lastSilenceLogUs > 30000000) {
+    if (now - m_lastSilenceLogUs > 600000000) {  // every 10 min
       m_lastSilenceLogUs = now;
-      ESP_LOGW(TAG, "no word from the doorbell for %lld s", silentMs / 1000);
+      ESP_LOGW(TAG, "no word from the doorbell for %lld min", silentMs / 60000);
     }
   }
   return true;

@@ -18,6 +18,8 @@ the original README, kept here as [README.upstream.md](README.upstream.md).
 | **PN532 over I2C** (upstream supports SPI only) | `main/Pn532I2cTransport.*`, reader type 3 |
 | **Relay reader** — the NFC front end lives on a second board, reached over ESP-NOW | `main/RemoteNfcReader.*`, reader type 4 |
 | **Relay doorbell firmware** — holds no keys, never joins WiFi, announces taps | `relay-doorbell/` |
+| **ST25R3916 reader** (MikroE NFC 4 Click over I2C) with low-power card detection; the doorbell deep-sleeps and wakes on a phone | `main/St25r3916Reader.*`, `relay-doorbell/` |
+| XIAO ESP32C6 RF switch driven (GPIO3/GPIO14) — undriven, the radio loses 20–30 dB | `CONFIG_XIAO_ESP32C6_RF_SWITCH` |
 | Single 3.75 MB app partition (the BLE stack outgrew the OTA layout) | `single_app.csv` |
 | Doorbell link status (paired / signal strength) on the dashboard | web UI |
 

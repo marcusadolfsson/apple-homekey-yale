@@ -118,10 +118,32 @@ public:
     uint8_t wakeUpDirectAmplitude() const { return m_wuDirectAmplitude; }
     uint8_t wakeUpSpread() const { return m_wuSpread; }
 
+    // State that must survive the host's deep sleep for the reader to resume
+    // in wake-up mode without a reset: init() issues SET_DEFAULT, which would
+    // wipe both the configuration and the event that woke the host. Plain
+    // bytes, so it can live in RTC memory.
+    struct WakeUpPersist {
+        uint8_t savedTxDriver;
+        uint8_t savedEnFd;
+        uint8_t refAmplitude;
+        uint8_t refPhase;
+    };
+    WakeUpPersist wakeUpPersist() const;
+    // Attach to a chip the host left in wake-up mode before sleeping: opens the
+    // bus, checks the identity and adopts the persisted state, without
+    // touching the chip, so a latched wake-up event is still there to read.
+    bool resumeInWakeUpMode(const WakeUpPersist& persisted);
+
     static constexpr uint8_t WAKE_AMPLITUDE = 0x04;  // bits of register 0x1C
     static constexpr uint8_t WAKE_PHASE = 0x02;
 
 private:
+    // Bus, device and identity check: everything init() and
+    // resumeInWakeUpMode() share. Does not touch the chip's configuration.
+    bool attach();
+    // The configuration init() applies after SET_DEFAULT.
+    bool configureAfterReset();
+
     // ---- low level bus access -------------------------------------------
     bool writeReg(uint8_t reg, uint8_t val);
     bool readReg(uint8_t reg, uint8_t& out);

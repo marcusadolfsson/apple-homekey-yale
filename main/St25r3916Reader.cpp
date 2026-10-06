@@ -156,6 +156,14 @@ St25r3916Reader::~St25r3916Reader() {
 }
 
 bool St25r3916Reader::init() {
+    if (!attach()) return false;
+
+    command(CMD_SET_DEFAULT);
+    vTaskDelay(pdMS_TO_TICKS(1));
+    return configureAfterReset();
+}
+
+bool St25r3916Reader::attach() {
     if (!m_bus) {
         i2c_master_bus_config_t buscfg = {};
         // -1 asks the driver to pick a free port. Hardcoding port 0 would
@@ -202,10 +210,10 @@ bool St25r3916Reader::init() {
     }
     ESP_LOGI(TAG, "Found ST25R391x, IC_IDENTITY 0x%02X (type 0x%02X rev %u)",
              identity, m_icType, m_icRev);
+    return true;
+}
 
-    command(CMD_SET_DEFAULT);
-    vTaskDelay(pdMS_TO_TICKS(1));
-
+bool St25r3916Reader::configureAfterReset() {
     // No IRQ line on the Grove connector, so unmask everything and poll the
     // status registers. Masked sources do not latch, which would hang the waits.
     writeReg(REG_MASK_MAIN_IRQ, 0x00);
@@ -1144,4 +1152,21 @@ bool St25r3916Reader::stopWakeUpMode() {
     m_wakeUpMode = false;
     if (!oscStable) ESP_LOGW(TAG, "wake-up: oscillator slow to restart");
     return oscStable;
+}
+
+St25r3916Reader::WakeUpPersist St25r3916Reader::wakeUpPersist() const {
+    return {m_savedTxDriver, m_savedEnFd, m_wuRef.amplitude, m_wuRef.phase};
+}
+
+bool St25r3916Reader::resumeInWakeUpMode(const WakeUpPersist& persisted) {
+    if (!attach()) return false;
+    m_savedTxDriver = persisted.savedTxDriver;
+    m_savedEnFd = persisted.savedEnFd;
+    m_wuRef.amplitude = persisted.refAmplitude;
+    m_wuRef.phase = persisted.refPhase;
+    m_fieldUp = false;
+    m_isodepActive = false;
+    m_wakeUpMode = true;
+    m_connected = true;
+    return true;
 }

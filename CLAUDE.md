@@ -282,8 +282,60 @@ The C6 itself is still awake — deep sleep is stage 2. Driver API:
 
 Results: **12 minutes idle with zero false wake-ups**; 3 of 3 taps woke the
 reader, card found 111–112 ms after wake-up, authenticated in 93–94 ms. The drive
-sweep takes ~6 s, so stage 2 has to persist the chosen `d_res` (NVS) rather than
-sweep on every wake from deep sleep.
+sweep takes ~6 s, so it runs once per power-up; stage 2 keeps the chosen `d_res`
+in RTC memory.
+
+### Deep sleep between events — stage 2, 2026-10-06
+
+The C6 now sleeps (7 µA) while the ST25R3916 sits in wake-up mode. It wakes on
+**D2 high** (reader IRQ: a phone), **D1 low** (button) or the **heartbeat timer**,
+does that one job and sleeps again. Build switch `DOORBELL_SLEEP` (default 1).
+
+- **What survives sleep** (`RtcState`, `RTC_DATA_ATTR`, POD only): pinned base
+  MAC and channel, ECP frame, listen/poll timings, `d_res`, the reader's
+  wake-up reference (`St25r3916Reader::WakeUpPersist`), last heartbeat / arm
+  times, wake counters. Time is `gettimeofday`, which keeps counting through
+  deep sleep (`esp_timer` restarts at 0). A cold boot clears it all.
+- **Waking from the reader**: `resumeInWakeUpMode()` attaches to the chip
+  *without* resetting it (a reset would lose the event), reads the IRQ, then polls.
+  Card announced ~336–339 ms after the C6 boots; auth 87–89 ms; Express animation
+  confirmed. The reader is re-armed as soon as the field is clear.
+- **Heartbeat** every hour (`HEARTBEAT_SLEEP_US`) with an ECP request; it must be
+  acked (any frame from the base) within 300 ms, 3 tries. If not, a short search
+  (`findBase(2)`); if that fails too, keep the pinned base and channel and retry
+  in 5 min (`HEARTBEAT_RETRY_US`) — never stay awake hunting. Normal heartbeat
+  wake: **~290 ms**. Exercised by accident while the base rebooted: 7.9 s, then
+  the retry succeeded. The base's silence alarm is 3 h (`HEARTBEAT_TIMEOUT_MS`).
+- **Sleep is refused** while: no base or ECP, reader not in wake-up mode, a tag
+  is present or the field not yet clear, the button is held, IRQ is high, a
+  heartbeat is unacked, or a frame left < 50 ms ago. The reference is re-taken
+  hourly (on a wake), not every minute as when awake.
+- **Pins in sleep**: IDF holds LP pad pulls; D1 pull-up, D2 pull-down, ext1 per
+  pin level (`esp_sleep_enable_ext1_wakeup_io`). After waking,
+  `rtc_gpio_hold_dis` + `rtc_gpio_deinit` on both before normal GPIO use.
+- **Working on it over USB**: the default build *does not sleep while a USB host
+  is attached* (`usb_serial_jtag_is_connected()`), so a doorbell on a computer
+  behaves as before. Bench-test sleep with the separate build
+  `idf.py -B build-sleeptest -DDOORBELL_SLEEP_ON_USB=1 build`: heartbeat 120 s,
+  retry 30 s, 3 s minimum awake per wake so the port can be caught. Every cold
+  boot stays awake 20 s (`COLD_BOOT_AWAKE_US`), the window for flashing — wait
+  for the port to appear, then flash. The last log line before sleep needs
+  `fflush` + `fsync` + 200 ms or it is lost.
+- The relay link key is printed only when generated or with the button held at
+  power-up — never on every wake.
+
+**XIAO ESP32C6 RF switch — must be driven.** The board routes its antenna
+through an RF switch: **GPIO3 low enables it, GPIO14 low selects the built-in
+ceramic antenna** (high: U.FL). Seeed's Arduino board package sets them; plain
+IDF and the generic `esp32c6` Arduino variant do not, so both boards ran with
+them floating. It worked by luck until deep sleep (GPIO3 is an LP pin), after
+which the base heard the doorbell at −94 dBm instead of −51…−67 and the doorbell
+could not hear the base at all. Fixed: the doorbell's `selectBuiltInAntenna()`
+runs first in `app_main`; the base sets them in `setup()` under
+`CONFIG_XIAO_ESP32C6_RF_SWITCH` (default y; `..._EXTERNAL_ANTENNA` for U.FL),
+and GPIO3/14 are restricted pins. After the fix: base Wi-Fi −75 → **−51 dBm**,
+relay link → **−64 dBm**. If RSSI ever drops ~20–30 dB for no reason, check this
+first.
 
 ### Express mode (the tap-without-Wallet animation) — hard-won
 
@@ -425,10 +477,12 @@ which is *not encrypted* — enable flash encryption before deploying.
 5. **Relay round trips run 28–160 ms**, above ESP-NOW's usual 5–15 ms; the largest
    is the iPhone's own crypto rather than the link. Against a directly attached
    reader the relay adds ~40 ms to a whole transaction, so this is low priority.
-6. **Still to do for a battery doorbell:** ST25R3916 in place of the PN532 (its
-   low-power card detection is the ~3 µA that makes idling possible), deep sleep
-   between taps with wake on the reader's IRQ and on the button, and a measurement
-   with a Nordic PPK2 rather than an estimate.
+6. **Still to do for a battery doorbell:** the battery divider on A0 and the
+   button (both untested on hardware; button wake untested); measure consumption
+   by battery voltage over days plus a multimeter in series (no PPK2); bound the
+   cold-boot `findBase()` so a doorbell powered up with the base down does not
+   search until the battery is flat; time a tap wake end to end ("done after"
+   in the sleep log line).
 7. Diagnostics still compiled in: I2C bus scan, BLE scan reports, relay statistics,
    the doorbell's poll-cycle rate (every 1000 cycles) and the ECP frame on push.
 8. **Web UI authentication is off by default**; turn it on before leaving a device
@@ -451,7 +505,7 @@ headers replaced by wires; see `docs/nfc4-click-rework.pdf`). It identified as
 relayed **endpoint authentication dropped to 86–96 ms**, about half the PN532's.
 **Express mode confirmed on the Click** (phone locked, no Wallet: the Home Key
 animation appears) - the ST25R3916's ECP path works on our hardware.
-IRQ is wired to D2 but not yet used (that is the deep-sleep wake). Both
+IRQ on D2 wakes the doorbell from deep sleep (stage 2, see Hardware). Both
 boards recover pairing on their own after either restarts or the AP changes
 channel. Dashboard shows pairing, link RSSI, reader-ready and doorbell battery;
 MQTT publishes the button and battery with HA discovery. Doorbell button and

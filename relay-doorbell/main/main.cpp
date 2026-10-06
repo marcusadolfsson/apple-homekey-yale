@@ -1,9 +1,12 @@
-// Relay doorbell: owns the PN532 and answers NFC operations for a base station
-// over ESP-NOW. No HomeKey keys, no WiFi association, no Bluetooth: the base
-// runs the HomeKey transaction and only the card exchange crosses the link.
+// Relay doorbell: owns the NFC reader and answers NFC operations for a base
+// station over ESP-NOW. No HomeKey keys, no WiFi association, no Bluetooth: the
+// base runs the HomeKey transaction and only the card exchange crosses the link,
+// encrypted and pinned by MAC.
 //
-// Test build: the radio stays awake (we are measuring latency, not power) and
-// the link is unencrypted.
+// With the ST25R3916 the doorbell deep-sleeps between events (DOORBELL_SLEEP):
+// the reader sits in its own low-power wake-up mode and raises IRQ (D2) when a
+// phone arrives; the button (D1) and an hourly heartbeat timer are the other
+// wake sources. State that has to survive the sleep lives in RTC memory.
 #include "DoorbellPn532Reader.hpp"
 #include "NfcReader.hpp"
 #include "RelayProtocol.hpp"
@@ -11,6 +14,8 @@
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "driver/rtc_io.h"
+#include "driver/usb_serial_jtag.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
@@ -23,6 +28,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "esp_random.h"
+#include "esp_sleep.h"
 #include "mbedtls/sha256.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -32,6 +38,9 @@
 #include <cstring>
 #include <string>
 #include <vector>
+
+#include <sys/time.h>
+#include <unistd.h>
 
 namespace {
 
@@ -51,8 +60,32 @@ constexpr gpio_num_t PIN_NFC_IRQ = GPIO_NUM_2;  // XIAO D2
 constexpr adc_channel_t BATTERY_CHANNEL = ADC_CHANNEL_0;  // GPIO0 on the C6
 constexpr int BATTERY_DIVIDER = 2;
 constexpr int64_t BUTTON_DEBOUNCE_US = 50000;
-constexpr int64_t HEARTBEAT_US = 30000000;
+constexpr int64_t HEARTBEAT_US = 30000000;  // while awake (on a computer's USB)
 constexpr int64_t BASE_SILENCE_US = HEARTBEAT_US * 3 / 2;
+
+// Deep sleep between events (stage 2 of the battery work). DOORBELL_SLEEP turns
+// it on; it only ever happens with the ST25R3916, whose wake-up mode is what
+// wakes us. While a computer is on the USB port the doorbell stays awake so it
+// can be flashed and logged -- a sleeping C6 drops off USB. DOORBELL_SLEEP_ON_USB
+// overrides that for bench tests, and also shortens the heartbeat so the board
+// reappears on USB every couple of minutes.
+#ifndef DOORBELL_SLEEP
+#define DOORBELL_SLEEP 1
+#endif
+#ifndef DOORBELL_SLEEP_ON_USB
+#define DOORBELL_SLEEP_ON_USB 0
+#endif
+constexpr int64_t HEARTBEAT_SLEEP_US = DOORBELL_SLEEP_ON_USB ? 120000000LL : 3600000000LL;
+constexpr int64_t COLD_BOOT_AWAKE_US = 20000000;  // time to flash or attach after a reset
+// After a wake, stay up at least this long. Bench tests need ~3 s for macOS to
+// re-enumerate the USB console, or nothing the wake did gets logged.
+constexpr int64_t WAKE_MIN_AWAKE_US = DOORBELL_SLEEP_ON_USB ? 3000000 : 0;
+constexpr int64_t HEARTBEAT_ACK_WAIT_US = 300000;  // the base acks in a few ms
+constexpr int HEARTBEAT_TRIES = 3;  // single frames get lost (base WiFi power save, AP hops)
+// After a failed search a sleeping doorbell tries again this soon, not an hour later.
+constexpr int64_t HEARTBEAT_RETRY_US = DOORBELL_SLEEP_ON_USB ? 30000000LL : 300000000LL;
+constexpr int64_t TX_DRAIN_US = 50000;  // let the last frame leave before sleeping
+constexpr int64_t LPCD_REARM_SLEEP_US = 3600000000LL;  // refresh the reference hourly
 constexpr int64_t BUTTON_REPEAT_US = 1000000;  // ignore chatter/held button
 const uint8_t BROADCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -61,6 +94,41 @@ struct Msg {
   uint8_t data[relay::MAX_ESPNOW];
   uint16_t len;
 };
+
+// Survives deep sleep (not a power cut). Plain bytes only: RTC_DATA_ATTR data is
+// not re-initialised on a wake, and a constructor would undo exactly that.
+struct RtcState {
+  uint32_t magic;
+  uint8_t base[6];
+  uint8_t channel;
+  uint8_t ecp[18];
+  uint16_t listenMs, pollDelayMs;
+  uint8_t dres;
+  uint8_t readerInWakeUp;
+  St25r3916Reader::WakeUpPersist wu;
+  int64_t lastHeartbeatUs;  // rtcNowUs() of the last heartbeat
+  int64_t lastArmUs;        // rtcNowUs() of the last wake-up reference
+  uint32_t wakes, nfcWakes, buttonWakes, timerWakes, taps;
+};
+RTC_DATA_ATTR RtcState g_rtc;
+constexpr uint32_t RTC_MAGIC = 0xD00B5701;
+
+// Keeps counting through deep sleep, unlike esp_timer_get_time().
+int64_t rtcNowUs() {
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  return int64_t(tv.tv_sec) * 1000000 + tv.tv_usec;
+}
+
+bool g_fromSleep = false;     // this boot is a wake with valid RTC state
+bool g_wokeByNfc = false, g_wokeByButton = false, g_wokeByTimer = false;
+int64_t g_stayAwakeUntilUs = 0;
+int64_t g_lastTxUs = 0;
+bool g_hbAcked = true;        // the last heartbeat has been answered
+int64_t g_hbAckDeadlineUs = 0;
+int g_hbTries = 0;
+int64_t g_tagAnnouncedAtUs = 0;  // esp_timer at this wake's first announcement
+int64_t g_readyToSleepAtUs = 0;  // first moment nothing but the minimum awake time kept us up
 
 QueueHandle_t g_rx = nullptr;
 uint8_t g_base[6] = {0};
@@ -126,12 +194,19 @@ int64_t g_lpcdActiveUntilUs = 0;
 int64_t g_lpcdLastPeekUs = 0;
 int64_t g_lpcdWakeUs = 0;
 bool g_lpcdWakePending = false;  // woke; waiting to see whether a card shows up
+bool g_lpcdCardSeen = false;     // this wake found a card: no false-alarm window to wait out
+int64_t g_fieldClearSinceUs = 0; // when g_awaitFieldClear was set
+// A phone left lying on the reader would hold the doorbell awake polling until
+// it is lifted. After this long, re-arm with it there: the reference then
+// includes the phone, and lifting it off is the next wake-up.
+constexpr int64_t FIELD_CLEAR_GIVE_UP_US = 10000000;
 int g_lpcdWakes = 0, g_lpcdWakesWithCard = 0, g_lpcdFalseWakes = 0;
 int64_t g_lpcdStatsUs = 0;
 int64_t g_lpcdLastWarnUs = 0;
 // TX driver resistance used in wake-up mode, picked by a sweep on first arm:
 // the strongest drive whose at-rest reading stays clear of the A/D ceiling.
 uint8_t g_lpcdDres = 0;
+bool g_lpcdSwept = false;  // the sweep has run (this boot, or before the sleep)
 constexpr uint8_t LPCD_TARGET_MAX = 200;  // leaves 55 steps of headroom below 255
 // The tag announcement is the one frame a tap cannot afford to lose: the base
 // drives everything else, so a dropped announcement means the card sits there
@@ -143,7 +218,6 @@ int g_tagAnnounceTries = 0;
 constexpr int64_t TAG_ANNOUNCE_RETRY_US = 250000;
 constexpr int TAG_ANNOUNCE_MAX_TRIES = 4;
 int64_t g_lastEcpReqUs = 0;
-int64_t g_lastHeartbeatUs = 0;
 int g_buttonLast = 1;  // pulled up: 1 = released
 int64_t g_buttonChangedUs = 0;
 int64_t g_lastPressUs = 0;
@@ -192,7 +266,7 @@ void linkSecurityInit() {
 
   // The key is a pairing secret: show it when it is created, and afterwards
   // only on request (doorbell button held while powering on), not every boot.
-  if (generated || gpio_get_level(PIN_BUTTON) == 0) {
+  if (generated || (!g_fromSleep && gpio_get_level(PIN_BUTTON) == 0)) {
     std::string hex;
     for (uint8_t b : key) { char t[3]; snprintf(t, sizeof(t), "%02x", b); hex += t; }
     ESP_LOGW(TAG, "relay link key: %s", hex.c_str());
@@ -308,6 +382,7 @@ bool addPeer(const uint8_t mac[6]) {
 void send(const uint8_t mac[6], relay::Op op, uint8_t seq, uint8_t flags,
           const uint8_t *payload, size_t len) {
   addPeer(mac);
+  g_lastTxUs = esp_timer_get_time();
   const size_t fragCnt = len == 0 ? 1 : (len + relay::MAX_PAYLOAD - 1) / relay::MAX_PAYLOAD;
   for (size_t i = 0; i < fragCnt; ++i) {
     uint8_t frame[relay::MAX_ESPNOW];
@@ -367,6 +442,36 @@ void i2cBusReport(uint8_t expect) {
   i2c_del_master_bus(bus);
 }
 
+void configureIrqPin() {
+  gpio_config_t irq{};
+  irq.pin_bit_mask = 1ULL << PIN_NFC_IRQ;
+  irq.mode = GPIO_MODE_INPUT;
+  irq.pull_down_en = GPIO_PULLDOWN_ENABLE;  // a broken wire reads "nothing here"
+  irq.intr_type = GPIO_INTR_DISABLE;
+  gpio_config(&irq);
+}
+
+// After a deep-sleep wake: re-attach to a reader the doorbell left in wake-up
+// mode, without the reset readerInit() does (that would wipe the wake-up
+// configuration and the event that woke us).
+bool readerResume() {
+  g_st = new St25r3916Reader({uint8_t(PIN_SDA), uint8_t(PIN_SCL), 255, 255}, g_ecp);
+  g_reader = g_st;
+  configureIrqPin();
+  if (!g_st->resumeInWakeUpMode(g_rtc.wu)) {
+    ESP_LOGW(TAG, "could not resume the reader; resetting it");
+    delete g_st;
+    g_st = nullptr;
+    g_reader = nullptr;
+    return false;
+  }
+  g_readerReady = true;
+  const int64_t now = esp_timer_get_time();
+  g_lpcdArmedUs = now;
+  g_lpcdLastPeekUs = now - LPCD_PEEK_US;  // read the wake-up register right away
+  return true;
+}
+
 bool readerInit() {
   if (!g_reader) {
     if (g_readerKind == ReaderKind::St25r3916) {
@@ -376,12 +481,7 @@ bool readerInit() {
       g_reader = g_st;
       ESP_LOGI(TAG, "reader: ST25R3916 on SDA=%d SCL=%d, IRQ on GPIO%d", PIN_SDA, PIN_SCL,
                PIN_NFC_IRQ);
-      gpio_config_t irq{};
-      irq.pin_bit_mask = 1ULL << PIN_NFC_IRQ;
-      irq.mode = GPIO_MODE_INPUT;
-      irq.pull_down_en = GPIO_PULLDOWN_ENABLE;  // a broken wire reads "nothing here"
-      irq.intr_type = GPIO_INTR_DISABLE;
-      gpio_config(&irq);
+      configureIrqPin();
     } else {
       g_reader = new DoorbellPn532Reader(PIN_SDA, PIN_SCL, g_ecp);
       ESP_LOGI(TAG, "reader: PN532 on SDA=%d SCL=%d", PIN_SDA, PIN_SCL);
@@ -416,9 +516,8 @@ void lpcdArm() {
   // down far enough to register (two minutes of taps produced no wake-up).
   // Each step arms insensitive (delta 15), so its reference is the mode's own
   // reading at that drive.
-  static bool swept = false;
-  if (!swept) {
-    swept = true;
+  if (!g_lpcdSwept) {
+    g_lpcdSwept = true;
     std::string line;
     int chosen = -1;
     for (uint8_t d = 0; d <= 15; ++d) {
@@ -448,6 +547,9 @@ void lpcdArm() {
   }
   g_lpcdArmedUs = now;
   g_lpcdLastPeekUs = now;
+  g_lpcdActiveUntilUs = 0;
+  g_lpcdCardSeen = false;
+  g_rtc.lastArmUs = rtcNowUs();
   const auto &ref = g_st->wakeUpReference();
   static bool firstArm = true;
   if (firstArm) {
@@ -478,8 +580,15 @@ bool lpcdGate() {
 
   if (!g_st->inWakeUpMode()) {
     // Polling. Go back to sleep once the window has passed and no card is
-    // (still) in the field.
-    if (now < g_lpcdActiveUntilUs || g_awaitFieldClear || g_tagActive) return false;
+    // (still) in the field. If this wake already found its card, the window -
+    // there only to tell a false alarm from a slow phone - is cut short.
+    if (g_awaitFieldClear && now - g_fieldClearSinceUs > FIELD_CLEAR_GIVE_UP_US) {
+      ESP_LOGI(TAG, "card still on the reader after %lld s; re-arming with it there",
+               FIELD_CLEAR_GIVE_UP_US / 1000000);
+      g_awaitFieldClear = false;
+    }
+    if ((now < g_lpcdActiveUntilUs && !g_lpcdCardSeen) || g_awaitFieldClear || g_tagActive)
+      return false;
     if (g_lpcdWakePending) {
       ++g_lpcdFalseWakes;
       g_lpcdWakePending = false;
@@ -525,6 +634,79 @@ bool lpcdGate() {
            (ev & St25r3916Reader::WAKE_PHASE) ? ((ev & St25r3916Reader::WAKE_AMPLITUDE) ? "+phase" : "phase") : "",
            (now - g_lpcdArmedUs) / 1000, seen.amplitude, ref.amplitude, seen.phase, ref.phase);
   return false;
+}
+
+bool sleepAllowedNow() {
+  if (!DOORBELL_SLEEP || !g_st) return false;
+  return DOORBELL_SLEEP_ON_USB || !usb_serial_jtag_is_connected();
+}
+
+[[noreturn]] void enterDeepSleep() {
+  g_rtc.magic = RTC_MAGIC;
+  std::memcpy(g_rtc.base, g_base, 6);
+  g_rtc.channel = g_channel;
+  std::memcpy(g_rtc.ecp, g_ecp.data(), g_ecp.size());
+  g_rtc.listenMs = g_listenMs;
+  g_rtc.pollDelayMs = g_pollDelayMs;
+  g_rtc.dres = g_lpcdDres;
+  g_rtc.readerInWakeUp = 1;
+  g_rtc.wu = g_st->wakeUpPersist();
+
+  // Wake on the reader's IRQ (high) or the button (low). The pulls are set on
+  // the low-power pads; the IDF holds them through the sleep.
+  rtc_gpio_init(PIN_BUTTON);
+  rtc_gpio_set_direction(PIN_BUTTON, RTC_GPIO_MODE_INPUT_ONLY);
+  rtc_gpio_pulldown_dis(PIN_BUTTON);
+  rtc_gpio_pullup_en(PIN_BUTTON);
+  rtc_gpio_init(PIN_NFC_IRQ);
+  rtc_gpio_set_direction(PIN_NFC_IRQ, RTC_GPIO_MODE_INPUT_ONLY);
+  rtc_gpio_pullup_dis(PIN_NFC_IRQ);
+  rtc_gpio_pulldown_en(PIN_NFC_IRQ);
+  esp_sleep_enable_ext1_wakeup_io(1ULL << PIN_NFC_IRQ, ESP_EXT1_WAKEUP_ANY_HIGH);
+  esp_sleep_enable_ext1_wakeup_io(1ULL << PIN_BUTTON, ESP_EXT1_WAKEUP_ANY_LOW);
+  int64_t untilHeartbeat = g_rtc.lastHeartbeatUs + HEARTBEAT_SLEEP_US - rtcNowUs();
+  if (untilHeartbeat < 1000000) untilHeartbeat = 1000000;
+  esp_sleep_enable_timer_wakeup(uint64_t(untilHeartbeat));
+
+  const char *why = g_wokeByNfc ? "a tap" : g_wokeByButton ? "the button" : g_wokeByTimer ? "the heartbeat timer"
+                                                                                       : "power-up";
+  char tap[64] = "";
+  if (g_tagAnnouncedAtUs)
+    snprintf(tap, sizeof(tap), ", card announced %lld ms after boot", g_tagAnnouncedAtUs / 1000);
+  ESP_LOGI(TAG, "sleeping: woken by %s, done after %lld ms (awake %lld ms)%s; next heartbeat in %lld s. "
+                "Since power-up: %lu wake-ups (%lu tap, %lu button, %lu timer), %lu cards",
+           why, g_readyToSleepAtUs / 1000, esp_timer_get_time() / 1000, tap, untilHeartbeat / 1000000,
+           (unsigned long)g_rtc.wakes,
+           (unsigned long)g_rtc.nfcWakes, (unsigned long)g_rtc.buttonWakes,
+           (unsigned long)g_rtc.timerWakes, (unsigned long)g_rtc.taps);
+  // Let the console drain: with 20 ms this last line never reached the
+  // computer, and it is the one carrying the wake-up timing.
+  fflush(stdout);
+  fsync(fileno(stdout));
+  vTaskDelay(pdMS_TO_TICKS(200));
+  esp_deep_sleep_start();
+}
+
+// Sleep if there is nothing left to do. Called from the idle loop.
+void maybeDeepSleep() {
+  if (!sleepAllowedNow()) return;
+  const int64_t now = esp_timer_get_time();
+  if (!g_baseKnown || !g_haveEcp || !g_st->inWakeUpMode()) return;
+  if (g_tagActive || g_awaitFieldClear || g_lpcdWakePending || now < g_lpcdActiveUntilUs) return;
+  if (gpio_get_level(PIN_BUTTON) == 0 || gpio_get_level(PIN_NFC_IRQ) != 0) return;
+  if (!g_hbAcked && now < g_hbAckDeadlineUs) return;
+  if (now - g_lastTxUs < TX_DRAIN_US) return;
+  if (rtcNowUs() - g_rtc.lastArmUs > LPCD_REARM_SLEEP_US) {
+    // Hours asleep: refresh the wake-up reference before the next stretch.
+    g_st->stopWakeUpMode();
+    lpcdArm();
+    return;  // sleep on a later pass, once it is armed again
+  }
+  // The minimum awake time comes last, so the log can say when the doorbell
+  // was actually done (bench builds stay up 3 s for the USB console).
+  if (!g_readyToSleepAtUs) g_readyToSleepAtUs = now;
+  if (now < g_stayAwakeUntilUs) return;
+  enterDeepSleep();
 }
 
 // Poll our own reader once; announce to the base if a card is there.
@@ -578,6 +760,9 @@ void pollOnce() {
   g_tagAnnouncedUs = g_tagActiveUs;
   g_tagAnnounceTries = 1;
   send(g_base, relay::Op::TagEvent, 0, 3, out.data(), out.size());
+  ++g_rtc.taps;
+  g_lpcdCardSeen = true;
+  if (!g_tagAnnouncedAtUs) g_tagAnnouncedAtUs = g_tagActiveUs;
   if (g_lpcdWakePending) {
     g_lpcdWakePending = false;
     ++g_lpcdWakesWithCard;
@@ -588,8 +773,19 @@ void pollOnce() {
   }
 }
 
-// Debounced press detection. Polled here because this test build stays awake;
-// a battery build would let the pin wake the chip instead.
+void sendButtonPress() {
+  if (!g_baseKnown) {
+    ESP_LOGW(TAG, "button pressed but no base is paired");
+    return;
+  }
+  ESP_LOGI(TAG, "button pressed; telling the base");
+  std::vector<uint8_t> payload;
+  appendBattery(payload, false);
+  send(g_base, relay::Op::ButtonPress, 0, 0, payload.data(), payload.size());
+}
+
+// Debounced press detection while awake. When asleep, the same pin wakes the
+// chip, and a button wake sends the press straight away (see app_main).
 void checkButton() {
   const int level = gpio_get_level(PIN_BUTTON);
   const int64_t now = esp_timer_get_time();
@@ -601,14 +797,7 @@ void checkButton() {
   if (level != 0 || now - g_buttonChangedUs < BUTTON_DEBOUNCE_US) return;
   if (now - g_lastPressUs < BUTTON_REPEAT_US) return;
   g_lastPressUs = now;
-  if (!g_baseKnown) {
-    ESP_LOGW(TAG, "button pressed but no base is paired");
-    return;
-  }
-  ESP_LOGI(TAG, "button pressed; telling the base");
-  std::vector<uint8_t> payload;
-  appendBattery(payload, false);
-  send(g_base, relay::Op::ButtonPress, 0, 0, payload.data(), payload.size());
+  sendButtonPress();
 }
 
 void handleApdu(const Msg &m, const relay::Header &h, const std::vector<uint8_t> &payload) {
@@ -677,6 +866,7 @@ void handle(const Msg &m, const relay::Header &h, const std::vector<uint8_t> &pa
       if (g_reader) g_reader->releaseTag();
       g_tagActive = false;  // resume watching for the next card
       g_awaitFieldClear = true;  // ...but only once this phone has left
+      g_fieldClearSinceUs = esp_timer_get_time();
       g_fieldClearPolls = 0;
       send(m.mac, relay::Op::ReleaseRsp, h.seq, 1, nullptr, 0);
       break;
@@ -689,7 +879,9 @@ void handle(const Msg &m, const relay::Header &h, const std::vector<uint8_t> &pa
   }
 }
 
-void findBase() {
+// rounds == 0: keep sweeping until a base answers. A sleeping doorbell passes a
+// limit, so an unreachable base costs a few seconds rather than the battery.
+void findBase(int rounds = 0) {
   // The base sits on its access point's channel; walk the 2.4 GHz channels
   // until it answers a ping. The channel we last found it on is tried first,
   // so the usual case costs one ping rather than a sweep.
@@ -698,7 +890,7 @@ void findBase() {
   std::vector<uint8_t> order{first};
   for (uint8_t ch = 1; ch <= 13; ++ch)
     if (ch != first) order.push_back(ch);
-  while (!g_baseKnown) {
+  for (int round = 0; !g_baseKnown && (rounds == 0 || round < rounds); ++round) {
     for (uint8_t ch : order) {
       if (g_baseKnown) break;
       g_channel = ch;
@@ -723,7 +915,51 @@ void findBase() {
 
 }  // namespace
 
+// The XIAO ESP32C6 routes its antenna through an RF switch: GPIO3 low enables
+// the switch, GPIO14 low selects the built-in ceramic antenna (high: the U.FL
+// connector). Seeed's Arduino board package sets both; plain ESP-IDF leaves them
+// floating. That happened to work until deep sleep, after which the doorbell's
+// frames reached the base at -94 dBm instead of -51..-67, too weak to hear the
+// base's replies at all. Neither pin is broken out, so driving them is safe.
+void selectBuiltInAntenna() {
+  constexpr gpio_num_t RF_SWITCH_EN = GPIO_NUM_3;   // an LP pin: undo any sleep hold first
+  constexpr gpio_num_t RF_ANTENNA_SEL = GPIO_NUM_14;
+  rtc_gpio_hold_dis(RF_SWITCH_EN);
+  rtc_gpio_deinit(RF_SWITCH_EN);
+  gpio_config_t rf{};
+  rf.pin_bit_mask = (1ULL << RF_SWITCH_EN) | (1ULL << RF_ANTENNA_SEL);
+  rf.mode = GPIO_MODE_OUTPUT;
+  gpio_config(&rf);
+  gpio_set_level(RF_SWITCH_EN, 0);
+  gpio_set_level(RF_ANTENNA_SEL, 0);
+}
+
 extern "C" void app_main() {
+  selectBuiltInAntenna();  // before the radio comes up
+  const esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+  const uint64_t ext1 = cause == ESP_SLEEP_WAKEUP_EXT1 ? esp_sleep_get_ext1_wakeup_status() : 0;
+  g_fromSleep = (cause == ESP_SLEEP_WAKEUP_EXT1 || cause == ESP_SLEEP_WAKEUP_TIMER) &&
+                g_rtc.magic == RTC_MAGIC;
+  // The wake pins come back routed to the low-power domain and held; give them
+  // back to the GPIO matrix before reading them.
+  for (gpio_num_t pin : {PIN_BUTTON, PIN_NFC_IRQ}) {
+    rtc_gpio_hold_dis(pin);
+    rtc_gpio_deinit(pin);
+  }
+  if (g_fromSleep) {
+    ++g_rtc.wakes;
+    g_wokeByNfc = ext1 & (1ULL << PIN_NFC_IRQ);
+    g_wokeByButton = ext1 & (1ULL << PIN_BUTTON);
+    g_wokeByTimer = cause == ESP_SLEEP_WAKEUP_TIMER;
+    if (g_wokeByNfc) ++g_rtc.nfcWakes;
+    if (g_wokeByButton) ++g_rtc.buttonWakes;
+    if (g_wokeByTimer) ++g_rtc.timerWakes;
+    g_stayAwakeUntilUs = WAKE_MIN_AWAKE_US;
+  } else {
+    std::memset(&g_rtc, 0, sizeof(g_rtc));
+    g_stayAwakeUntilUs = COLD_BOOT_AWAKE_US;
+  }
+
   esp_err_t err = nvs_flash_init();
   if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     nvs_flash_erase();
@@ -777,9 +1013,32 @@ extern "C" void app_main() {
       nvs_close(h);
     }
   }
-  if (!readerInit()) ESP_LOGE(TAG, "continuing without a working NFC reader");
-
-  findBase();
+  if (g_fromSleep) {
+    // Restore what the cold boot learnt: no channel sweep, no ECP request and
+    // no drive sweep on a wake.
+    std::memcpy(g_base, g_rtc.base, 6);
+    g_channel = g_rtc.channel;
+    esp_wifi_set_channel(g_channel, WIFI_SECOND_CHAN_NONE);
+    addPeer(g_base);
+    g_baseKnown = true;
+    std::memcpy(g_ecp.data(), g_rtc.ecp, g_ecp.size());
+    g_listenMs = g_rtc.listenMs;
+    g_pollDelayMs = g_rtc.pollDelayMs;
+    g_haveEcp = true;
+    g_lpcdDres = g_rtc.dres;
+    g_lpcdSwept = true;
+  }
+  const bool resumed = g_fromSleep && g_rtc.readerInWakeUp &&
+                       g_readerKind == ReaderKind::St25r3916 && readerResume();
+  if (!resumed && !readerInit()) ESP_LOGE(TAG, "continuing without a working NFC reader");
+  if (!g_fromSleep) findBase();
+  if (g_wokeByButton) {
+    // Send it now: a short press may already be over, and checkButton() would
+    // never see it.
+    g_lastPressUs = esp_timer_get_time();
+    g_buttonLast = gpio_get_level(PIN_BUTTON);
+    sendButtonPress();
+  }
 
   int64_t lastRequestUs = esp_timer_get_time();
   while (true) {
@@ -797,12 +1056,47 @@ extern "C" void app_main() {
       // occasionally. One small frame every 30 s is cheap even on battery.
       // This has to run even while we are still waiting for ECP data, or a
       // doorbell stuck in that state never reports its reader or its battery.
-      if (g_baseKnown && !g_tagActive &&
-          esp_timer_get_time() - g_lastHeartbeatUs > HEARTBEAT_US) {
-        g_lastHeartbeatUs = esp_timer_get_time();
+      const int64_t heartbeatEvery = sleepAllowedNow() ? HEARTBEAT_SLEEP_US : HEARTBEAT_US;
+      if (g_baseKnown && !g_tagActive && rtcNowUs() - g_rtc.lastHeartbeatUs > heartbeatEvery) {
+        g_rtc.lastHeartbeatUs = rtcNowUs();
         std::vector<uint8_t> hb;
         appendBattery(hb, true);
         send(g_base, relay::Op::HealthRsp, 0, g_readerReady ? 2 : 0, hb.data(), hb.size());
+        g_hbAcked = false;
+        g_hbTries = 1;
+        g_hbAckDeadlineUs = esp_timer_get_time() + HEARTBEAT_ACK_WAIT_US;
+        // Pick up a new ECP frame if HomeKit was re-provisioned while we slept:
+        // the base cannot push one to a sleeping doorbell.
+        if (sleepAllowedNow()) send(g_base, relay::Op::EcpReq, 0, 0, nullptr, 0);
+      }
+      if (!g_hbAcked && esp_timer_get_time() > g_hbAckDeadlineUs && g_hbTries < HEARTBEAT_TRIES) {
+        // Resend before concluding anything: a single frame is easily lost.
+        ++g_hbTries;
+        std::vector<uint8_t> hb;
+        appendBattery(hb, false);
+        send(g_base, relay::Op::HealthRsp, 0, g_readerReady ? 2 : 0, hb.data(), hb.size());
+        g_hbAckDeadlineUs = esp_timer_get_time() + HEARTBEAT_ACK_WAIT_US;
+      } else if (!g_hbAcked && esp_timer_get_time() > g_hbAckDeadlineUs) {
+        // No ack after several tries: the base restarted or its AP moved
+        // channel. Search, but a sleeping doorbell only sweeps twice: if the
+        // base is still unreachable it keeps the pinned base and its last
+        // channel, sleeps, and tries again in HEARTBEAT_RETRY_US. (Giving up by
+        // forgetting the base left it awake for good: "base unknown" blocks
+        // sleep, and nothing searched again.)
+        g_hbAcked = true;
+        ESP_LOGW(TAG, "heartbeat not acknowledged after %d tries; searching for the base", g_hbTries);
+        const uint8_t lastChannel = g_channel;
+        g_baseKnown = false;
+        findBase(sleepAllowedNow() ? 2 : 0);
+        if (!g_baseKnown && g_basePinned) {
+          g_baseKnown = true;
+          g_channel = lastChannel;
+          esp_wifi_set_channel(g_channel, WIFI_SECOND_CHAN_NONE);
+          g_rtc.lastHeartbeatUs = rtcNowUs() - heartbeatEvery + HEARTBEAT_RETRY_US;
+          ESP_LOGW(TAG, "base unreachable; keeping it on channel %u and retrying in %lld s",
+                   g_channel, HEARTBEAT_RETRY_US / 1000000);
+        }
+        lastRequestUs = esp_timer_get_time();
       }
       // Silence means the base restarted or its AP moved channel. This has to
       // run before the poll-and-continue below, or a polling doorbell never
@@ -820,6 +1114,7 @@ extern "C" void app_main() {
       }
       if (g_haveEcp && !g_tagActive) {
         pollOnce();
+        maybeDeepSleep();
         continue;
       }
       if (g_baseKnown && !g_haveEcp && esp_timer_get_time() - g_lastEcpReqUs > 2000000) {
@@ -845,11 +1140,13 @@ extern "C" void app_main() {
         if (g_reader) g_reader->releaseTag();
         g_tagActive = false;
         g_awaitFieldClear = true;
+      g_fieldClearSinceUs = esp_timer_get_time();
         g_fieldClearPolls = 0;
       }
       continue;
     }
     lastRequestUs = esp_timer_get_time();
+    g_hbAcked = true;        // anything from the base answers the heartbeat
     g_tagAnnounceTries = 0;  // the base is talking to us; stop repeating
     relay::Header h{};
     std::memcpy(&h, m.data, relay::HDR);
