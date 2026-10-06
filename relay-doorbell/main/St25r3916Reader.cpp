@@ -1154,6 +1154,17 @@ bool St25r3916Reader::stopWakeUpMode() {
     return oscStable;
 }
 
+bool St25r3916Reader::powerDown() {
+    if (!m_dev) return false;
+    if (m_wakeUpMode) {
+        modifyReg(REG_OP_CONTROL, OP_WU, 0);
+        command(CMD_STOP);
+        m_wakeUpMode = false;
+    }
+    m_fieldUp = false;
+    return writeReg(REG_OP_CONTROL, 0x00);
+}
+
 St25r3916Reader::WakeUpPersist St25r3916Reader::wakeUpPersist() const {
     return {m_savedTxDriver, m_savedEnFd, m_wuRef.amplitude, m_wuRef.phase};
 }

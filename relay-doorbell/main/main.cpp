@@ -86,6 +86,12 @@ constexpr int HEARTBEAT_TRIES = 3;  // single frames get lost (base WiFi power s
 constexpr int64_t HEARTBEAT_RETRY_US = DOORBELL_SLEEP_ON_USB ? 30000000LL : 300000000LL;
 constexpr int64_t TX_DRAIN_US = 50000;  // let the last frame leave before sleeping
 constexpr int64_t LPCD_REARM_SLEEP_US = 3600000000LL;  // refresh the reference hourly
+// No base found (it is down, or out of range): search for a few seconds, then
+// sleep and try again later, backing off. Searching costs ~80 mA; doing it
+// without a limit would flatten the battery in a day.
+constexpr int BASE_SEARCH_ROUNDS = 2;  // ~6.5 s: 13 channels x 250 ms, twice
+constexpr int64_t BASE_SEARCH_BACKOFF_S[] = {60, 120, 300, 600, 1800, 3600};
+constexpr int64_t BASE_SEARCH_BACKOFF_TEST_S = 30;  // sleep-on-USB bench build
 constexpr int64_t BUTTON_REPEAT_US = 1000000;  // ignore chatter/held button
 const uint8_t BROADCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -109,9 +115,11 @@ struct RtcState {
   int64_t lastHeartbeatUs;  // rtcNowUs() of the last heartbeat
   int64_t lastArmUs;        // rtcNowUs() of the last wake-up reference
   uint32_t wakes, nfcWakes, buttonWakes, timerWakes, taps;
+  uint8_t baseLost;     // asleep because no base answered: search again on waking
+  uint8_t searchFails;  // consecutive failed searches, for the back-off
 };
 RTC_DATA_ATTR RtcState g_rtc;
-constexpr uint32_t RTC_MAGIC = 0xD00B5701;
+constexpr uint32_t RTC_MAGIC = 0xD00B5702;
 
 // Keeps counting through deep sleep, unlike esp_timer_get_time().
 int64_t rtcNowUs() {
@@ -641,6 +649,48 @@ bool sleepAllowedNow() {
   return DOORBELL_SLEEP_ON_USB || !usb_serial_jtag_is_connected();
 }
 
+// Wake on the reader's IRQ (high, when `nfc`) and the button (low). The pulls
+// are set on the low-power pads; the IDF holds them through the sleep.
+void armWakePins(bool nfc) {
+  rtc_gpio_init(PIN_BUTTON);
+  rtc_gpio_set_direction(PIN_BUTTON, RTC_GPIO_MODE_INPUT_ONLY);
+  rtc_gpio_pulldown_dis(PIN_BUTTON);
+  rtc_gpio_pullup_en(PIN_BUTTON);
+  rtc_gpio_init(PIN_NFC_IRQ);
+  rtc_gpio_set_direction(PIN_NFC_IRQ, RTC_GPIO_MODE_INPUT_ONLY);
+  rtc_gpio_pullup_dis(PIN_NFC_IRQ);
+  rtc_gpio_pulldown_en(PIN_NFC_IRQ);
+  if (nfc) esp_sleep_enable_ext1_wakeup_io(1ULL << PIN_NFC_IRQ, ESP_EXT1_WAKEUP_ANY_HIGH);
+  esp_sleep_enable_ext1_wakeup_io(1ULL << PIN_BUTTON, ESP_EXT1_WAKEUP_ANY_LOW);
+}
+
+void flushConsoleBeforeSleep() {
+  // Let the console drain: with 20 ms this last line never reached the
+  // computer, and it is the one carrying the wake-up timing.
+  fflush(stdout);
+  fsync(fileno(stdout));
+  vTaskDelay(pdMS_TO_TICKS(200));
+}
+
+// No base answered. Nothing to serve taps for, so the reader is powered down
+// and only the timer (back-off) or the button (try again now) wakes us.
+[[noreturn]] void sleepWithoutBase() {
+  g_rtc.magic = RTC_MAGIC;
+  g_rtc.baseLost = 1;
+  g_rtc.readerInWakeUp = 0;
+  if (g_rtc.searchFails < 255) ++g_rtc.searchFails;
+  if (g_st) g_st->powerDown();
+  armWakePins(false);
+  constexpr int steps = sizeof(BASE_SEARCH_BACKOFF_S) / sizeof(BASE_SEARCH_BACKOFF_S[0]);
+  const int64_t waitS = DOORBELL_SLEEP_ON_USB ? BASE_SEARCH_BACKOFF_TEST_S
+                                              : BASE_SEARCH_BACKOFF_S[std::min<int>(g_rtc.searchFails, steps) - 1];
+  esp_sleep_enable_timer_wakeup(uint64_t(waitS) * 1000000);
+  ESP_LOGW(TAG, "no base station found (%u searches in a row); sleeping, next search in %lld s "
+                "or when the button is pressed", g_rtc.searchFails, waitS);
+  flushConsoleBeforeSleep();
+  esp_deep_sleep_start();
+}
+
 [[noreturn]] void enterDeepSleep() {
   g_rtc.magic = RTC_MAGIC;
   std::memcpy(g_rtc.base, g_base, 6);
@@ -652,18 +702,9 @@ bool sleepAllowedNow() {
   g_rtc.readerInWakeUp = 1;
   g_rtc.wu = g_st->wakeUpPersist();
 
-  // Wake on the reader's IRQ (high) or the button (low). The pulls are set on
-  // the low-power pads; the IDF holds them through the sleep.
-  rtc_gpio_init(PIN_BUTTON);
-  rtc_gpio_set_direction(PIN_BUTTON, RTC_GPIO_MODE_INPUT_ONLY);
-  rtc_gpio_pulldown_dis(PIN_BUTTON);
-  rtc_gpio_pullup_en(PIN_BUTTON);
-  rtc_gpio_init(PIN_NFC_IRQ);
-  rtc_gpio_set_direction(PIN_NFC_IRQ, RTC_GPIO_MODE_INPUT_ONLY);
-  rtc_gpio_pullup_dis(PIN_NFC_IRQ);
-  rtc_gpio_pulldown_en(PIN_NFC_IRQ);
-  esp_sleep_enable_ext1_wakeup_io(1ULL << PIN_NFC_IRQ, ESP_EXT1_WAKEUP_ANY_HIGH);
-  esp_sleep_enable_ext1_wakeup_io(1ULL << PIN_BUTTON, ESP_EXT1_WAKEUP_ANY_LOW);
+  g_rtc.baseLost = 0;
+  g_rtc.searchFails = 0;
+  armWakePins(true);
   int64_t untilHeartbeat = g_rtc.lastHeartbeatUs + HEARTBEAT_SLEEP_US - rtcNowUs();
   if (untilHeartbeat < 1000000) untilHeartbeat = 1000000;
   esp_sleep_enable_timer_wakeup(uint64_t(untilHeartbeat));
@@ -679,11 +720,7 @@ bool sleepAllowedNow() {
            (unsigned long)g_rtc.wakes,
            (unsigned long)g_rtc.nfcWakes, (unsigned long)g_rtc.buttonWakes,
            (unsigned long)g_rtc.timerWakes, (unsigned long)g_rtc.taps);
-  // Let the console drain: with 20 ms this last line never reached the
-  // computer, and it is the one carrying the wake-up timing.
-  fflush(stdout);
-  fsync(fileno(stdout));
-  vTaskDelay(pdMS_TO_TICKS(200));
+  flushConsoleBeforeSleep();
   esp_deep_sleep_start();
 }
 
@@ -1013,7 +1050,10 @@ extern "C" void app_main() {
       nvs_close(h);
     }
   }
-  if (g_fromSleep) {
+  // A wake after a failed search starts over like a cold boot (minus the
+  // 20 s stay-awake window); any other wake resumes the link.
+  const bool resumeLink = g_fromSleep && !g_rtc.baseLost;
+  if (resumeLink) {
     // Restore what the cold boot learnt: no channel sweep, no ECP request and
     // no drive sweep on a wake.
     std::memcpy(g_base, g_rtc.base, 6);
@@ -1028,10 +1068,23 @@ extern "C" void app_main() {
     g_lpcdDres = g_rtc.dres;
     g_lpcdSwept = true;
   }
-  const bool resumed = g_fromSleep && g_rtc.readerInWakeUp &&
+  const bool resumed = resumeLink && g_rtc.readerInWakeUp &&
                        g_readerKind == ReaderKind::St25r3916 && readerResume();
   if (!resumed && !readerInit()) ESP_LOGE(TAG, "continuing without a working NFC reader");
-  if (!g_fromSleep) findBase();
+  if (!resumeLink) {
+    if (!sleepAllowedNow()) {
+      findBase();  // on a computer: keep looking, as before
+    } else {
+      // Bounded, but never shorter than the cold boot's stay-awake window,
+      // which is there so the board can be flashed.
+      findBase(BASE_SEARCH_ROUNDS);
+      while (!g_baseKnown && esp_timer_get_time() < g_stayAwakeUntilUs) findBase(1);
+      if (!g_baseKnown) sleepWithoutBase();
+    }
+    if (g_rtc.baseLost) ESP_LOGI(TAG, "base found after %u failed searches", g_rtc.searchFails);
+    g_rtc.baseLost = 0;
+    g_rtc.searchFails = 0;
+  }
   if (g_wokeByButton) {
     // Send it now: a short press may already be over, and checkButton() would
     // never see it.

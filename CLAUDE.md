@@ -323,6 +323,15 @@ does that one job and sleeps again. Build switch `DOORBELL_SLEEP` (default 1).
   `fflush` + `fsync` + 200 ms or it is lost.
 - The relay link key is printed only when generated or with the button held at
   power-up — never on every wake.
+- **No base at power-up** (base down or out of range): on battery the search is
+  bounded — 2 sweeps of 13 channels (~7 s), stretched to the 20 s cold-boot
+  window — then `sleepWithoutBase()`: reader in power-down (`powerDown()`),
+  wake on the timer or the button only, back-off 1, 2, 5, 10, 30, 60 min
+  (`BASE_SEARCH_BACKOFF_S`; 30 s in the bench build). A wake with
+  `RtcState::baseLost` searches again like a cold boot. Tested by holding the
+  base in its bootloader: 20 s search, sleep, 7 s retries, and found on the first
+  retry after the base came back. On a computer's USB it still searches without
+  limit, as before.
 
 **XIAO ESP32C6 RF switch — must be driven.** The board routes its antenna
 through an RF switch: **GPIO3 low enables it, GPIO14 low selects the built-in
@@ -479,10 +488,11 @@ which is *not encrypted* — enable flash encryption before deploying.
    reader the relay adds ~40 ms to a whole transaction, so this is low priority.
 6. **Still to do for a battery doorbell:** the battery divider on A0 and the
    button (both untested on hardware; button wake untested); measure consumption
-   by battery voltage over days plus a multimeter in series (no PPK2); bound the
-   cold-boot `findBase()` so a doorbell powered up with the base down does not
-   search until the battery is flat; time a tap wake end to end ("done after"
-   in the sleep log line).
+   by battery voltage over days plus a multimeter in series (no PPK2). A tap
+   wake measured 2026-10-06: card announced 336 ms after boot, base auth 91 ms,
+   lock accepted the unlock 1.5 s later; the doorbell was done after 2.1 s
+   (mostly waiting for the phone to leave the reader, ~0.4 s re-taking the
+   wake-up reference).
 7. Diagnostics still compiled in: I2C bus scan, BLE scan reports, relay statistics,
    the doorbell's poll-cycle rate (every 1000 cycles) and the ECP frame on push.
 8. **Web UI authentication is off by default**; turn it on before leaving a device

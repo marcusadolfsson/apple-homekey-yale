@@ -111,6 +111,9 @@ public:
     // the readings the chip took on its most recent measurement.
     uint8_t takeWakeUpEvents(AntennaReading* lastMeasured = nullptr);
     bool stopWakeUpMode();
+    // Power-down mode: oscillator, receiver and field off (~1 uA). For a doorbell
+    // that sleeps with no base to serve taps for; init() brings the chip back.
+    bool powerDown();
     bool inWakeUpMode() const { return m_wakeUpMode; }
     const AntennaReading& wakeUpReference() const { return m_wuRef; }
     // From the last startWakeUpMode(): the reference the measure command gave,
