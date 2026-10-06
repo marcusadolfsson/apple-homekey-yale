@@ -194,7 +194,12 @@ in the clear because ESP-NOW cannot encrypt broadcast.
   free for BLE. The announcement is **repeated up to 4× at 250 ms** until an APDU
   arrives — it is the one frame a tap cannot afford to lose, and at −67 dBm a
   single frame went missing often enough to cost whole taps. The doorbell holds the
-  card until `ReleaseReq` (or a 2 s fallback). **The base must send that release
+  card until `ReleaseReq` (or a 2 s fallback). **One physical tap = one
+  announcement:** after each release the doorbell waits until the field has been
+  empty for two polls in a row before it will announce again, so a phone left
+  resting on the reader is one tap however long it stays (a re-detected phone is
+  just released). Verified with the ST25R3916: three taps, three announcements,
+  three unlock attempts. **The base must send that release
   even while BLE holds the radio**: a successful tap sets `g_bleRadioBusy` the
   instant the unlock is requested, so a "skip when busy" guard in `releaseTag()`
   meant no release after any *successful* tap and a 5 s blind window after every
@@ -254,7 +259,10 @@ same evening.
 - **The doorbell carries both drivers** behind the base's `INfcReader`
   (`relay-doorbell/main/DoorbellPn532Reader.hpp`, `St25r3916Reader.*` copied
   verbatim from the base). Selection: compile default `DOORBELL_DEFAULT_READER`
-  (0 = PN532, 1 = ST25R3916), overridable from NVS `relay/reader` (u8). Both sit
+  (0 = PN532, **1 = ST25R3916, the default since 2026-10-06**), overridable from
+  NVS `relay/reader` (u8). On boot the doorbell probes the reader's address on
+  its own short-lived bus and logs who answers (`I2C: reader answers at 0x50`, or
+  the full bus contents if not) before the driver claims the pins. Both sit
   on SDA→D4 (GPIO22), SCL→D5 (GPIO23); the ST25R3916 driver was written against
   the M5Stack Unit NFC at I2C 0x50 and polls the chip's IRQ registers over I2C,
   so it works with **no IRQ wire** — that only matters for deep-sleep wake.
@@ -329,15 +337,21 @@ which is *not encrypted* — enable flash encryption before deploying.
    `pollOnce(); continue;` in the main loop, so a polling doorbell never reached
    it and stayed parked on a dead channel until power-cycled. Anything that must
    run every loop goes *above* that `continue`.)
-3. **A tap pre-empts an in-flight BLE connect or scan.** Running the card exchange
-   *concurrently* with a connect corrupted it, so the two never overlap — but a
-   person at the door outranks a link attempt, and the tap's own unlock restarts
-   it (a 0.3–0.7 s reconnect at the door). While `g_bleLinkAttempt` is set, a tag
-   announcement calls `YaleBleLock::abortLinkAttempt()` (`ble_gap_conn_cancel` +
-   `ble_gap_disc_cancel`; the worker sees `ConnectFailed`/`DiscDone`, and
-   `waitFor()` returns on those rather than running out the clock). An abort is
-   not counted as a failure. Only the ~100 ms handshake/ack phase still drops a
-   tap. History of that window: it used to be 4 s direct connect + 30 s scan,
+3. **Taps are dropped while the lock link is busy — by design, and that is
+   correct.** The link is busy because an unlock is already on its way, so the
+   door opens anyway. Running the card exchange *concurrently* with a connect
+   corrupted it, so the two never overlap.
+   **Do not re-add tap pre-emption.** From 2026-09-16 to 10-06 a tap cancelled an
+   in-flight connect (`abortLinkAttempt`) so it could authenticate. It never
+   helped anyone through the door — in range it threw away connect progress to
+   redo the same unlock, out of range the new attempt was just as doomed — and
+   with the ST25R3916 it broke single taps: the same phone, still on the reader,
+   was re-detected ~300 ms later, aborted the unlock its first detection had
+   started, and its own unlock then fell inside the 2 s de-dupe window
+   (`DEDUPE_MS`). One tap, zero unlocks. The doorbell now also announces each
+   physical tap once (see the relay protocol section). `waitFor()` still returns
+   early on `ConnectFailed`/`DiscDone`, which is just correct.
+   History of the busy window: it used to be 4 s direct connect + 30 s scan,
    during which announcements were *queued*, then acted on late. Now: the scan is
    8 s (`SCAN_MS`) and **is skipped entirely while the address is cached** until
    three direct connects fail in a row (`DIRECT_FAILURES_BEFORE_SCAN`) — a failed
@@ -382,7 +396,14 @@ which is *not encrypted* — enable flash encryption before deploying.
 
 Working end to end (2026-09-16): iPhone Home Key **Express** tap on the doorbell
 (phone locked, no Wallet) → relayed over encrypted, MAC-pinned ESP-NOW → base
-authenticates in ~190 ms → Yale unlocks over BLE, ~3.2 s next to the lock. Both
+authenticates in ~190 ms → Yale unlocks over BLE, ~3.2 s next to the lock.
+
+**2026-10-06: the doorbell runs on the MikroE NFC 4 Click (ST25R3916)**, reworked
+to I2C (three 0 Ω COMM SEL links moved, R1 removed to kill the power LED,
+headers replaced by wires; see `docs/nfc4-click-rework.pdf`). It identified as
+`IC_IDENTITY 0x2A (type 0x05 rev 2)` at 0x50 with no driver changes, and the
+relayed **endpoint authentication dropped to 86–96 ms**, about half the PN532's.
+IRQ is wired to D2 but not yet used (that is the deep-sleep wake). Both
 boards recover pairing on their own after either restarts or the AP changes
 channel. Dashboard shows pairing, link RSSI, reader-ready and doorbell battery;
 MQTT publishes the button and battery with HA discovery. Doorbell button and

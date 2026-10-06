@@ -273,24 +273,22 @@ void RemoteNfcReader::rxTask() {
       // concurrent connect corrupted APDUs). Queueing the announcement instead
       // meant that, the moment BLE let go, the base "detected" a phone that had
       // left 30 s earlier and ran a 0-byte transaction for each queued repeat.
+      //
+      // A tap that lands while the lock link is busy is dropped, not acted on:
+      // the link is busy because an unlock is already on its way, so the door
+      // opens anyway. Pre-empting the link for the new tap was tried and
+      // removed - in range it threw away connect progress to redo the same
+      // unlock, out of range the new attempt was just as doomed, and with a
+      // fast reader the same phone re-detected ~300 ms later aborted the unlock
+      // it had just started (its own unlock then fell in the de-dupe window).
       if (g_bleRadioBusy.load(std::memory_order_acquire)) {
-        if (g_bleLinkAttempt.load(std::memory_order_acquire)) {
-          // A connect or scan is in flight. The person at the door outranks it:
-          // cancel it and let the tap through. The busy flag clears within a
-          // few ms once the worker sees the cancel, well inside the 1.5 s the
-          // queued announcement stays valid. The tap's own unlock reconnects.
-          ESP_LOGI(TAG, "tap during a lock link attempt; aborting the attempt for it");
-          YaleBleLock::abortLinkAttempt();
-        } else {
-          // Handshake or command in progress: ~100 ms, not worth interrupting.
-          const int64_t now = esp_timer_get_time();
-          if (now - m_lastBusyDropLogUs > 5000000) {
-            m_lastBusyDropLogUs = now;
-            ESP_LOGW(TAG, "tap announced during the lock handshake; ignored");
-          }
-          delete r;
-          continue;
+        const int64_t now = esp_timer_get_time();
+        if (now - m_lastBusyDropLogUs > 5000000) {
+          m_lastBusyDropLogUs = now;
+          ESP_LOGI(TAG, "tap while the lock link is busy; ignored (an unlock is already under way)");
         }
+        delete r;
+        continue;
       }
     }
     QueueHandle_t q = tagEvent ? m_tagEvents : m_responses;
@@ -394,7 +392,10 @@ bool RemoteNfcReader::pollForTag(std::vector<uint8_t> &uid, std::array<uint8_t, 
 void RemoteNfcReader::noteBattery(const uint8_t *tail, size_t len) {
   if (len < 2) return;
   const uint16_t mv = uint16_t(tail[len - 2]) | uint16_t(tail[len - 1]) << 8;
-  if (mv < 2500 || mv > 6000) return;  // below this there is no battery, just a floating pin
+  // A floating A0 (no divider fitted) has read as high as 2640 mV, so anything
+  // under 3.0 V is treated as "no battery". A protected 1S cell cuts out around
+  // there anyway.
+  if (mv < 3000 || mv > 6000) return;
   const bool firstReport = m_batteryMv == 0;
   const bool moved = m_batteryMv && (mv > m_batteryMv + 50 || mv + 50 < m_batteryMv);
   m_batteryMv = mv;

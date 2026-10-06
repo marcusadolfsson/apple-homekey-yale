@@ -10,6 +10,7 @@
 #include "St25r3916Reader.hpp"
 
 #include "driver/gpio.h"
+#include "driver/i2c_master.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
@@ -68,7 +69,7 @@ uint8_t g_channel = 0;
 // low-power card detection a battery build needs.
 enum class ReaderKind : uint8_t { Pn532 = 0, St25r3916 = 1 };
 #ifndef DOORBELL_DEFAULT_READER
-#define DOORBELL_DEFAULT_READER 0
+#define DOORBELL_DEFAULT_READER 1
 #endif
 ReaderKind g_readerKind = ReaderKind(DOORBELL_DEFAULT_READER);
 INfcReader *g_reader = nullptr;
@@ -87,6 +88,15 @@ uint16_t g_listenMs = 500;
 uint16_t g_pollDelayMs = 100;
 bool g_tagActive = false;       // a card is being worked on; stop polling
 int64_t g_tagActiveUs = 0;
+// One physical tap = one announcement. After a transaction the phone is usually
+// still lying on the reader, and announcing it again sends the base through a
+// second full transaction and a second unlock request while the first unlock is
+// still connecting - with the fast ST25R3916 that came ~300 ms later, and it
+// (together with a since-removed pre-emption on the base) left a tap with no
+// unlock at all. After each release, wait for the field to be empty for two
+// polls in a row before announcing anything again.
+bool g_awaitFieldClear = false;
+int g_fieldClearPolls = 0;
 // The tag announcement is the one frame a tap cannot afford to lose: the base
 // drives everything else, so a dropped announcement means the card sits there
 // doing nothing until the 5 s timeout. Keep it and repeat it until the base
@@ -279,9 +289,52 @@ void send(const uint8_t mac[6], relay::Op op, uint8_t seq, uint8_t flags,
 
 // ---------------------------------------------------------------- PN532
 
+// Who answers on the reader's I2C pins? The ST25R3916 driver only reports
+// "no response at 0x50"; on a freshly modified board (COMM SEL jumpers moved,
+// headers replaced by wires) the useful fact is what, if anything, is there.
+// Runs once at boot on its own short-lived bus, before the driver claims it.
+void i2cBusReport(uint8_t expect) {
+  i2c_master_bus_config_t cfg{};
+  cfg.i2c_port = -1;
+  cfg.sda_io_num = PIN_SDA;
+  cfg.scl_io_num = PIN_SCL;
+  cfg.clk_source = I2C_CLK_SRC_DEFAULT;
+  cfg.glitch_ignore_cnt = 7;
+  cfg.flags.enable_internal_pullup = true;
+  i2c_master_bus_handle_t bus = nullptr;
+  if (i2c_new_master_bus(&cfg, &bus) != ESP_OK) return;
+  bool present = false;
+  for (int i = 0; i < 3 && !present; ++i) {  // first transaction may wake the chip
+    present = i2c_master_probe(bus, expect, 20) == ESP_OK;
+    if (!present) vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  if (present) {
+    ESP_LOGI(TAG, "I2C: reader answers at 0x%02X", expect);
+  } else {
+    std::string found;
+    for (uint16_t a = 0x08; a < 0x78; ++a) {
+      if (i2c_master_probe(bus, a, 20) == ESP_OK) {
+        char t[8];
+        snprintf(t, sizeof(t), " 0x%02X", a);
+        found += t;
+      }
+    }
+    char want[8];
+    snprintf(want, sizeof(want), " 0x%02X", expect);
+    if (found.find(want) != std::string::npos) {
+      ESP_LOGI(TAG, "I2C: reader answers at 0x%02X (slow to wake)", expect);
+    } else {
+      ESP_LOGE(TAG, "I2C: nothing at 0x%02X; the bus answered at:%s", expect,
+               found.empty() ? " (nothing - check wiring, power and the COMM SEL jumpers)" : found.c_str());
+    }
+  }
+  i2c_del_master_bus(bus);
+}
+
 bool readerInit() {
   if (!g_reader) {
     if (g_readerKind == ReaderKind::St25r3916) {
+      i2cBusReport(0x50);
       // Same 4-pin array the base uses: [0] = SDA, [1] = SCL.
       g_reader = new St25r3916Reader({uint8_t(PIN_SDA), uint8_t(PIN_SCL), 255, 255}, g_ecp);
       ESP_LOGI(TAG, "reader: ST25R3916 on SDA=%d SCL=%d", PIN_SDA, PIN_SCL);
@@ -310,14 +363,20 @@ void pollOnce() {
     }
     return;
   }
-  // The ECP frame is what makes an iPhone raise the Home Key on its own. It is
-  // fire-and-forget (nothing answers it), but a transport-level failure here is
-  // invisible except as "taps only work with the key open in Wallet", so report
-  // a status change rather than discarding it.
   std::vector<uint8_t> uid;
   std::array<uint8_t, 2> atqa{};
   uint8_t sak = 0;
-  if (!g_reader->pollForTag(uid, atqa, sak, g_listenMs)) return;
+  const bool found = g_reader->pollForTag(uid, atqa, sak, g_listenMs);
+  if (g_awaitFieldClear) {
+    if (found) {
+      g_fieldClearPolls = 0;
+      g_reader->releaseTag();  // same phone, still here: not a new tap
+    } else if (++g_fieldClearPolls >= 2) {
+      g_awaitFieldClear = false;  // the field is clear; the next card is a new tap
+    }
+    return;
+  }
+  if (!found) return;
   std::vector<uint8_t> out;
   out.push_back(uint8_t(uid.size()));
   out.insert(out.end(), uid.begin(), uid.end());
@@ -422,6 +481,8 @@ void handle(const Msg &m, const relay::Header &h, const std::vector<uint8_t> &pa
     case relay::Op::ReleaseReq:
       if (g_reader) g_reader->releaseTag();
       g_tagActive = false;  // resume watching for the next card
+      g_awaitFieldClear = true;  // ...but only once this phone has left
+      g_fieldClearPolls = 0;
       send(m.mac, relay::Op::ReleaseRsp, h.seq, 1, nullptr, 0);
       break;
     case relay::Op::HealthReq: {
@@ -585,6 +646,8 @@ extern "C" void app_main() {
         ESP_LOGW(TAG, "no release from the base 2 s after the tag; resuming polling");
         if (g_reader) g_reader->releaseTag();
         g_tagActive = false;
+        g_awaitFieldClear = true;
+        g_fieldClearPolls = 0;
       }
       continue;
     }
