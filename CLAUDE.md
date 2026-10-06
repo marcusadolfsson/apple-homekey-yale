@@ -210,9 +210,13 @@ in the clear because ESP-NOW cannot encrypt broadcast.
 - `HealthRsp` — unsolicited heartbeat every 30 s; liveness is inferred from traffic
   received rather than polled for (`HEARTBEAT_TIMEOUT_MS`). **The base answers it
   with a `Pong`.** Between taps that ack is the only frame the base ever sends, and
-  the doorbell re-scans for the base after 30 s without hearing from it — without
-  the ack an idle doorbell "lost" the base every 30 s and swept the channels for
-  nothing. Verified: no re-scan across several idle minutes once acked.
+  the doorbell re-scans for the base after `BASE_SILENCE_US` (45 s, 1.5 heartbeat
+  intervals) without hearing from it — without the ack an idle doorbell "lost" the
+  base every 30 s and swept the channels for nothing. **Keep the silence timeout
+  longer than the heartbeat interval:** with both at 30 s, the silence check ran
+  in the same loop iteration that had just sent a heartbeat, before its ack could
+  arrive, and re-scanned every 30 s anyway (18 times in 13 minutes, found
+  2026-10-06).
 - `ButtonPress` — the doorbell button.
 
 **Tap announcements have their own queue** on the base. Sharing one queue with
@@ -241,6 +245,45 @@ request/response replies made the polling wait swallow them.
   tried for a stronger field: no change to Express mode, and the rewiring caused
   reboots. A hung PN532 holds SDA low (`clear bus failed`, `I2C scan: no devices`)
   and **esptool's reset does not power-cycle it** — unplug the board's USB.
+
+### Low-power card detection (ST25R3916 wake-up mode) — stage 1, 2026-10-06
+
+The doorbell no longer polls ~15 times a second with the field on. Its reader
+rests in the ST25R3916's wake-up mode (oscillator off, the chip sampling the
+antenna every `LPCD_PERIOD_MS` = 100 ms); a phone moves the reading, the chip
+raises IRQ on **D2 (GPIO2)**, and only then does the doorbell poll, for
+`LPCD_ACTIVE_US` (1.5 s), re-arming once the field is clear. The reference is
+re-taken every 60 s. Build switch `DOORBELL_LPCD` (default 1); ST25R3916 only.
+The C6 itself is still awake — deep sleep is stage 2. Driver API:
+`measureAntenna`, `startWakeUpMode(period, ampDelta, phaseDelta, d_res)`,
+`takeWakeUpEvents`, `stopWakeUpMode` (sequence and registers from ST's RFAL,
+`rfalWakeUpModeStart`, AN5320). Hard-won on the NFC 4 Click:
+
+1. **The amplitude reading saturates at full drive** — 255, the top of the A/D.
+   A phone could not pull it into range: two minutes of taps, zero wake-ups. Wake-up
+   mode now runs with a weaker field (TX_DRIVER 0x28, `d_res`), restored to full
+   drive for polling. A sweep at first arm picks the strongest drive whose reading
+   is ≤ 200: `0:255 1:255 2:217 3:139 4:139 5–14:75 15:42` → **d_res 3, ~139**,
+   identical on repeat boots.
+2. **Take the reference from wake-up mode itself.** RFAL takes it with the
+   measure command, which disagreed with the mode's own readings (238–251 vs a
+   steady 251, near saturation) so every arm fired on its first sample. Now:
+   arm insensitive (delta 15), let the timer take three readings, adopt their
+   average, then tighten the delta, without leaving the mode.
+3. **Phase reads 0 throughout** on this board, so detection is amplitude-only
+   (RFAL's default is too).
+4. **A phone *raises* the amplitude** here — ~+3 at detection distance, to ~204
+   lying on the reader (rest 139). The comparison is symmetric. Delta **3**:
+   2 fired on noise, and at-rest readings sit within 1–2 steps.
+5. **Short listen window for the ST25R3916** (`ST25R3916_LISTEN_MS` = 25). The
+   base's 500 ms is a PN532 figure (a ceiling there); the ST25R3916 driver waits
+   it out while the phone is not answering yet, so a wake-up took ~585 ms to find
+   the card. With 25 ms it repeats ECP + WUPA every few tens of ms: **111 ms**.
+
+Results: **12 minutes idle with zero false wake-ups**; 3 of 3 taps woke the
+reader, card found 111–112 ms after wake-up, authenticated in 93–94 ms. The drive
+sweep takes ~6 s, so stage 2 has to persist the chosen `d_res` (NVS) rather than
+sweep on every wake from deep sleep.
 
 ### Express mode (the tap-without-Wallet animation) — hard-won
 
@@ -356,7 +399,10 @@ which is *not encrypted* — enable flash encryption before deploying.
    8 s (`SCAN_MS`) and **is skipped entirely while the address is cached** until
    three direct connects fail in a row (`DIRECT_FAILURES_BEFORE_SCAN`) — a failed
    direct connect with a known address means "out of range", and scanning only
-   held the radio to learn the same thing. Out of range the window is now ~4 s.
+   held the radio to learn the same thing. The counter **resets when the scan
+   runs**, so out of range it scans once per three failures; until 2026-10-06 it
+   reset only on success, and every failure after the third paid 4 s + an 8 s
+   scan. Out of range the window is now ~4 s.
    In range it is connect + handshake + the lock's ack, ~0.7–1.2 s cold and
    ~0.1 s on a lingering session; the ~1.8 s the motor takes is no longer held
    (the unlock returns on the ack, see the Yale section).

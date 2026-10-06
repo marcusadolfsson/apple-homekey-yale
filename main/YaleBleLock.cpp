@@ -618,6 +618,11 @@ bool YaleBleLock::ensureConnected() {
                m_directFailures);
       return false;
     }
+    // Scan once per DIRECT_FAILURES_BEFORE_SCAN failures, not on every failure
+    // after the third: the counter used to reset only on success, so once the
+    // lock had been out of range for three taps every later tap paid 4 s of
+    // direct connect plus an 8 s scan, with taps dropped throughout.
+    m_directFailures = 0;
     if (!scanAndConnect()) return false;
   }
   m_directFailures = 0;

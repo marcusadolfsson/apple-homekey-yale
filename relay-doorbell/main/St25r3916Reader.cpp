@@ -34,6 +34,17 @@ constexpr uint8_t REG_FIFO_STATUS2 = 0x1F;
 constexpr uint8_t REG_NUM_TX_BYTES1 = 0x22;
 constexpr uint8_t REG_NUM_TX_BYTES2 = 0x23;
 constexpr uint8_t REG_IC_IDENTITY = 0x3F;
+// Wake-up mode (addresses from ST's RFAL st25r3916_com.h).
+constexpr uint8_t REG_AD_RESULT = 0x25;
+constexpr uint8_t REG_TX_DRIVER = 0x28;  // high nibble am_mod, low nibble d_res
+constexpr uint8_t TX_DRIVER_D_RES_MASK = 0x0F;
+constexpr uint8_t REG_WUP_TIMER_CONTROL = 0x32;
+constexpr uint8_t REG_AMPLITUDE_MEASURE_CONF = 0x33;
+constexpr uint8_t REG_AMPLITUDE_MEASURE_REF = 0x34;
+constexpr uint8_t REG_AMPLITUDE_MEASURE_RESULT = 0x36;
+constexpr uint8_t REG_PHASE_MEASURE_CONF = 0x37;
+constexpr uint8_t REG_PHASE_MEASURE_REF = 0x38;
+constexpr uint8_t REG_PHASE_MEASURE_RESULT = 0x3A;
 
 // ---- direct commands ------------------------------------------------------
 constexpr uint8_t CMD_SET_DEFAULT = 0xC1;
@@ -41,12 +52,23 @@ constexpr uint8_t CMD_TRANSMIT_WITH_CRC = 0xC4;
 constexpr uint8_t CMD_TRANSMIT_WITHOUT_CRC = 0xC5;
 constexpr uint8_t CMD_TRANSMIT_WUPA = 0xC7;
 constexpr uint8_t CMD_ADJUST_REGULATORS = 0xD6;
+constexpr uint8_t CMD_STOP = 0xC2;
+constexpr uint8_t CMD_MEASURE_AMPLITUDE = 0xD3;
+constexpr uint8_t CMD_MEASURE_PHASE = 0xD9;
 constexpr uint8_t CMD_CLEAR_FIFO = 0xDB;
 
 // ---- bits -----------------------------------------------------------------
 constexpr uint8_t OP_EN = 0x80;     // oscillator + regulator
 constexpr uint8_t OP_RX_EN = 0x40;
 constexpr uint8_t OP_TX_EN = 0x08;  // drives the RF field
+constexpr uint8_t OP_WU = 0x04;     // low-power wake-up mode
+constexpr uint8_t OP_EN_FD_MASK = 0x03;  // external field detector
+// Wake-up timer control (0x32): wur selects 10 ms steps (10-80 ms) instead of
+// 100 ms steps (100-800 ms); wut is the step count minus one.
+constexpr uint8_t WUP_WUR = 0x80;
+constexpr uint8_t WUP_WUT_SHIFT = 4;
+constexpr uint8_t WUP_WAM = 0x04;  // compare amplitude
+constexpr uint8_t WUP_WPH = 0x02;  // compare phase
 constexpr uint8_t MODE_OM_ISO14443A = 0x01 << 3;
 constexpr uint8_t AUX_NO_CRC_RX = 0x80;
 
@@ -56,6 +78,7 @@ constexpr uint32_t IRQ_OSC = 0x80ul << 24;
 constexpr uint32_t IRQ_RXE = 0x10ul << 24;
 constexpr uint32_t IRQ_TXE = 0x08ul << 24;
 constexpr uint32_t IRQ_NRE = 0x40ul << 16;
+constexpr uint32_t IRQ_DCT = 0x80ul << 16;  // direct command finished
 constexpr uint32_t IRQ_CRC = 0x80ul << 8;
 constexpr uint32_t IRQ_PAR = 0x40ul << 8;
 constexpr uint32_t IRQ_ERR2 = 0x20ul << 8;
@@ -231,6 +254,7 @@ void St25r3916Reader::stop() {
     m_connected = false;
     m_isodepActive = false;
     m_fieldUp = false;
+    m_wakeUpMode = false;
     m_icType = 0;
     m_icRev = 0;
 }
@@ -961,4 +985,163 @@ bool St25r3916Reader::exchangeApdu(const std::vector<uint8_t>& send,
             return false;
         }
     }
+}
+
+// ---------------------------------------------------------- wake-up mode
+
+bool St25r3916Reader::measureAntenna(AntennaReading& out) {
+    if (!m_dev || m_wakeUpMode) return false;
+    // RFAL takes these with the field off and the oscillator running; each
+    // command drives the antenna itself for ~25 us and leaves the result in
+    // the A/D register.
+    if (m_fieldUp) setField(false);
+    auto measure = [&](uint8_t cmd, uint8_t& result) {
+        clearInterrupts();
+        if (!command(cmd)) return false;
+        if (!(waitInterrupt(IRQ_DCT, 10) & IRQ_DCT)) return false;
+        return readReg(REG_AD_RESULT, result);
+    };
+    return measure(CMD_MEASURE_AMPLITUDE, out.amplitude) && measure(CMD_MEASURE_PHASE, out.phase);
+}
+
+bool St25r3916Reader::startWakeUpMode(uint16_t periodMs, uint8_t amplitudeDelta,
+                                      uint8_t phaseDelta, uint8_t driverResistance) {
+    if (!m_dev || m_wakeUpMode) return false;
+    if (amplitudeDelta == 0 && phaseDelta == 0) return false;
+
+    // Same order as RFAL's rfalWakeUpModeStart: field and receiver off,
+    // external field detector off, references measured while the oscillator
+    // still runs, every source but the wake-up ones masked, then the timer,
+    // and last the wu bit, which also stops the oscillator.
+    setField(false);
+    m_isodepActive = false;
+    uint8_t op = 0;
+    if (!readReg(REG_OP_CONTROL, op)) return false;
+    m_savedEnFd = op & OP_EN_FD_MASK;
+    modifyReg(REG_OP_CONTROL, OP_EN_FD_MASK, 0);
+    writeReg(REG_MODE, MODE_OM_ISO14443A);
+    if (!readReg(REG_TX_DRIVER, m_savedTxDriver)) return false;
+    modifyReg(REG_TX_DRIVER, TX_DRIVER_D_RES_MASK, driverResistance & TX_DRIVER_D_RES_MASK);
+
+    AntennaReading ref;
+    if (!measureAntenna(ref)) {
+        ESP_LOGE(TAG, "wake-up: could not take the reference measurement");
+        modifyReg(REG_OP_CONTROL, OP_EN_FD_MASK, m_savedEnFd);
+        writeReg(REG_TX_DRIVER, m_savedTxDriver);
+        return false;
+    }
+    m_wuDirectAmplitude = ref.amplitude;
+
+    uint8_t wup = 0;
+    unsigned steps;
+    if (periodMs < 100) {
+        wup |= WUP_WUR;
+        steps = periodMs / 10;
+    } else {
+        steps = periodMs / 100;
+    }
+    if (steps < 1) steps = 1;
+    if (steps > 8) steps = 8;
+    wup |= static_cast<uint8_t>((steps - 1) << WUP_WUT_SHIFT);
+
+    // The reference RFAL takes with the measure command does not match what
+    // the chip measures in wake-up mode on this hardware: on the NFC 4 Click
+    // the command read 238-251 while wake-up mode read 251 on 49 of 51 samples,
+    // so every arm fired on its first sample. Arm insensitive (delta 15) with
+    // the command's reading, let the timer take a few readings of its own,
+    // then adopt their average and tighten the delta - all without leaving
+    // the mode, so the reference and the comparisons share their conditions.
+    // No auto-averaging: the reference is re-taken whenever the mode is
+    // re-armed, which also keeps it honest after a phone has been removed.
+    constexpr uint8_t CALIBRATING = 0xF0;  // delta 15
+    uint8_t unmask = 0;
+    if (amplitudeDelta) {
+        writeReg(REG_AMPLITUDE_MEASURE_CONF, CALIBRATING);
+        writeReg(REG_AMPLITUDE_MEASURE_REF, ref.amplitude);
+        wup |= WUP_WAM;
+        unmask |= WAKE_AMPLITUDE;
+    }
+    if (phaseDelta) {
+        writeReg(REG_PHASE_MEASURE_CONF, CALIBRATING);
+        writeReg(REG_PHASE_MEASURE_REF, ref.phase);
+        wup |= WUP_WPH;
+        unmask |= WAKE_PHASE;
+    }
+
+    writeReg(REG_MASK_MAIN_IRQ, 0xFF);
+    writeReg(REG_MASK_TIMER_NFC_IRQ, 0xFF);
+    writeReg(REG_MASK_ERROR_WAKEUP_IRQ, static_cast<uint8_t>(~unmask));
+    writeReg(REG_MASK_PASSIVE_TARGET_IRQ, 0xFF);
+    clearInterrupts();
+
+    writeReg(REG_WUP_TIMER_CONTROL, wup);
+    if (!modifyReg(REG_OP_CONTROL,
+                   static_cast<uint8_t>(OP_EN | OP_RX_EN | OP_TX_EN | OP_EN_FD_MASK | OP_WU),
+                   OP_WU)) {
+        ESP_LOGE(TAG, "wake-up: could not enter the mode");
+        return false;
+    }
+    m_wakeUpMode = true;
+
+    // Calibrate in place from the mode's own readings.
+    constexpr int SAMPLES = 3;
+    unsigned aSum = 0, pSum = 0;
+    uint8_t aLo = 255, aHi = 0;
+    for (int i = 0; i < SAMPLES; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(periodMs + periodMs / 4 + 1));
+        uint8_t a = 0, ph = 0;
+        readReg(REG_AMPLITUDE_MEASURE_RESULT, a);
+        readReg(REG_PHASE_MEASURE_RESULT, ph);
+        aSum += a;
+        pSum += ph;
+        if (a < aLo) aLo = a;
+        if (a > aHi) aHi = a;
+    }
+    m_wuRef.amplitude = static_cast<uint8_t>((aSum + SAMPLES / 2) / SAMPLES);
+    m_wuRef.phase = static_cast<uint8_t>((pSum + SAMPLES / 2) / SAMPLES);
+    m_wuSpread = static_cast<uint8_t>(aHi - aLo);
+    // Reference first, then the real delta, so there is no window in which
+    // the old reference meets the tight delta.
+    if (amplitudeDelta) {
+        writeReg(REG_AMPLITUDE_MEASURE_REF, m_wuRef.amplitude);
+        writeReg(REG_AMPLITUDE_MEASURE_CONF, static_cast<uint8_t>((amplitudeDelta & 0x0F) << 4));
+    }
+    if (phaseDelta) {
+        writeReg(REG_PHASE_MEASURE_REF, m_wuRef.phase);
+        writeReg(REG_PHASE_MEASURE_CONF, static_cast<uint8_t>((phaseDelta & 0x0F) << 4));
+    }
+    uint8_t latched = 0;
+    readReg(REG_ERROR_WAKEUP_IRQ, latched);  // drop anything latched while calibrating
+    return true;
+}
+
+uint8_t St25r3916Reader::takeWakeUpEvents(AntennaReading* lastMeasured) {
+    if (!m_dev) return 0;
+    uint8_t irq = 0;
+    if (!readReg(REG_ERROR_WAKEUP_IRQ, irq)) return 0;  // read-to-clear
+    if (lastMeasured) {
+        readReg(REG_AMPLITUDE_MEASURE_RESULT, lastMeasured->amplitude);
+        readReg(REG_PHASE_MEASURE_RESULT, lastMeasured->phase);
+    }
+    return irq & (WAKE_AMPLITUDE | WAKE_PHASE);
+}
+
+bool St25r3916Reader::stopWakeUpMode() {
+    if (!m_dev) return false;
+    // RFAL's rfalWakeUpModeStop, plus restoring the polling-mode masks this
+    // driver relies on (every source unmasked; see init()).
+    modifyReg(REG_OP_CONTROL, OP_WU, 0);
+    command(CMD_STOP);
+    writeReg(REG_MASK_MAIN_IRQ, 0x00);
+    writeReg(REG_MASK_TIMER_NFC_IRQ, 0x00);
+    writeReg(REG_MASK_ERROR_WAKEUP_IRQ, 0x00);
+    writeReg(REG_MASK_PASSIVE_TARGET_IRQ, 0x00);
+    clearInterrupts();
+    writeReg(REG_TX_DRIVER, m_savedTxDriver);  // full drive for polling again
+    modifyReg(REG_OP_CONTROL, OP_EN_FD_MASK, m_savedEnFd);
+    modifyReg(REG_OP_CONTROL, 0, OP_EN);
+    const bool oscStable = (waitInterrupt(IRQ_OSC, 20) & IRQ_OSC) != 0;
+    m_wakeUpMode = false;
+    if (!oscStable) ESP_LOGW(TAG, "wake-up: oscillator slow to restart");
+    return oscStable;
 }

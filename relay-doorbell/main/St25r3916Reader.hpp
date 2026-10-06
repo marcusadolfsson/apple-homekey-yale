@@ -81,6 +81,46 @@ public:
     // nothing to push to the chip when NfcManager regenerates it.
     bool updateECP() override { return true; }
 
+    // ---- low-power wake-up (card detection without polling) -----------
+    //
+    // In wake-up mode the chip stops its oscillator and, every periodMs,
+    // briefly drives the antenna and compares the amplitude and/or phase it
+    // sees against a reference taken when the mode starts. A phone close
+    // enough to load the antenna moves the reading; past the configured
+    // delta the chip latches a wake-up interrupt and raises its IRQ pin.
+    // Everything except the wake-up sources is masked while it is active, so
+    // the IRQ pin means exactly "something is here". The polling API above
+    // must not be used until stopWakeUpMode() has run.
+    // Sequence and register layout follow ST's RFAL (rfalWakeUpModeStart,
+    // application note AN5320).
+    struct AntennaReading {
+        uint8_t amplitude = 0;
+        uint8_t phase = 0;
+    };
+    // One amplitude and one phase measurement with the field off, as RFAL
+    // takes the wake-up reference. Not available in wake-up mode.
+    bool measureAntenna(AntennaReading& out);
+    // A delta of 0 disables that measurement; at least one must be enabled.
+    // driverResistance (0-15, TX_DRIVER d_res) weakens the field for the
+    // wake-up measurements only; full drive is restored by stopWakeUpMode().
+    // It exists because on some antennas the amplitude reading saturates at
+    // full drive, and a saturated reading cannot see a phone pull it down.
+    bool startWakeUpMode(uint16_t periodMs, uint8_t amplitudeDelta, uint8_t phaseDelta,
+                         uint8_t driverResistance = 0);
+    // Read-to-clear: which wake-up sources fired (WAKE_* bits), and optionally
+    // the readings the chip took on its most recent measurement.
+    uint8_t takeWakeUpEvents(AntennaReading* lastMeasured = nullptr);
+    bool stopWakeUpMode();
+    bool inWakeUpMode() const { return m_wakeUpMode; }
+    const AntennaReading& wakeUpReference() const { return m_wuRef; }
+    // From the last startWakeUpMode(): the reference the measure command gave,
+    // and the spread of the wake-up-mode readings that replaced it.
+    uint8_t wakeUpDirectAmplitude() const { return m_wuDirectAmplitude; }
+    uint8_t wakeUpSpread() const { return m_wuSpread; }
+
+    static constexpr uint8_t WAKE_AMPLITUDE = 0x04;  // bits of register 0x1C
+    static constexpr uint8_t WAKE_PHASE = 0x02;
+
 private:
     // ---- low level bus access -------------------------------------------
     bool writeReg(uint8_t reg, uint8_t val);
@@ -139,6 +179,14 @@ private:
     bool m_blockMismatchLogged = false;
     uint16_t m_fsc = 32;      // max frame the card accepts, from ATS
     uint32_t m_fwtMs = 5;     // frame waiting time, from ATS
+
+    // Wake-up mode state.
+    bool m_wakeUpMode = false;
+    AntennaReading m_wuRef;
+    uint8_t m_wuDirectAmplitude = 0;
+    uint8_t m_wuSpread = 0;
+    uint8_t m_savedEnFd = 0;  // external field detector setting to restore
+    uint8_t m_savedTxDriver = 0;  // TX_DRIVER to restore after wake-up mode
 
     static constexpr const char* TAG = "St25r3916Reader";
 };
