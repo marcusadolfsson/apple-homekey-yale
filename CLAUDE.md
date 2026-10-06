@@ -403,6 +403,8 @@ to I2C (three 0 Ω COMM SEL links moved, R1 removed to kill the power LED,
 headers replaced by wires; see `docs/nfc4-click-rework.pdf`). It identified as
 `IC_IDENTITY 0x2A (type 0x05 rev 2)` at 0x50 with no driver changes, and the
 relayed **endpoint authentication dropped to 86–96 ms**, about half the PN532's.
+**Express mode confirmed on the Click** (phone locked, no Wallet: the Home Key
+animation appears) - the ST25R3916's ECP path works on our hardware.
 IRQ is wired to D2 but not yet used (that is the deep-sleep wake). Both
 boards recover pairing on their own after either restarts or the AP changes
 channel. Dashboard shows pairing, link RSSI, reader-ready and doorbell battery;
