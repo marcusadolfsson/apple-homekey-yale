@@ -340,7 +340,9 @@ does that one job and sleeps again. Build switch `DOORBELL_SLEEP` (default 1).
   window — then `sleepWithoutBase()`, waking on the back-off timer (1, 2, 5,
   10, then every 15 min; `BASE_SEARCH_BACKOFF_S`; 30 s in the bench build), the
   button, **or a tap**: the reader stays in wake-up mode, a tap wakes the
-  doorbell, it searches (last known channel first, usually one ping), and with
+  doorbell, it searches (last known channel first, usually one ping; for up to
+  30 s after a tap or button press, `BASE_SEARCH_ATTENDED_US`, since the base may
+  still be starting), and with
   the reader *resumed* rather than reset the wake-up event survives, so the
   phone still on the reader is served on that same wake once the ECP frame
   arrives. (Until 2026-10-08 the reader was powered down and only the timer —

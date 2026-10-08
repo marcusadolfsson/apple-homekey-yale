@@ -91,7 +91,10 @@ constexpr int64_t LPCD_REARM_SLEEP_US = 3600000000LL;  // refresh the reference 
 // No base found (it is down, or out of range): search for a few seconds, then
 // sleep and try again later, backing off. Searching costs ~80 mA; doing it
 // without a limit would flatten the battery in a day.
-constexpr int BASE_SEARCH_ROUNDS = 2;  // ~6.5 s: 13 channels x 250 ms, twice
+constexpr int BASE_SEARCH_ROUNDS = 2;  // ~7 s: 13 channels x 250 ms, twice
+// Someone is at the door (a tap or the button woke us): search longer, since
+// the base may still be starting up. ~0.7 mAh per such wake.
+constexpr int64_t BASE_SEARCH_ATTENDED_US = 30000000;
 // Taps also wake a doorbell without a base (see sleepWithoutBase), so the
 // timer only matters when nobody is at the door; 15 min caps how long the
 // base's dashboard shows it missing after an outage.
@@ -1114,7 +1117,10 @@ extern "C" void app_main() {
       // Bounded, but never shorter than the cold boot's stay-awake window,
       // which is there so the board can be flashed.
       findBase(BASE_SEARCH_ROUNDS);
-      while (!g_baseKnown && esp_timer_get_time() < g_stayAwakeUntilUs) findBase(1);
+      int64_t searchUntil = g_stayAwakeUntilUs;
+      if (g_fromSleep && (g_wokeByNfc || g_wokeByButton))
+        searchUntil = std::max<int64_t>(searchUntil, BASE_SEARCH_ATTENDED_US);
+      while (!g_baseKnown && esp_timer_get_time() < searchUntil) findBase(1);
       if (!g_baseKnown) sleepWithoutBase();
     }
     if (g_rtc.baseLost) ESP_LOGI(TAG, "base found after %u failed searches", g_rtc.searchFails);
