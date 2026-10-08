@@ -217,7 +217,12 @@ int64_t g_lpcdLastWarnUs = 0;
 // the strongest drive whose at-rest reading stays clear of the A/D ceiling.
 uint8_t g_lpcdDres = 0;
 bool g_lpcdSwept = false;  // the sweep has run (this boot, or before the sleep)
-constexpr uint8_t LPCD_TARGET_MAX = 200;  // leaves 55 steps of headroom below 255
+// At most 160. With a ferrite sheet behind the antenna the production Click
+// reads 187 at full drive, under the old 200 limit, and full drive false-woke
+// every 1-2 s: each re-arm right after a burst of polling took a reference
+// that the reading then crept 3 steps above. The bench Click ran at ~140
+// (d_res 3) with no false wake-ups in 12 minutes.
+constexpr uint8_t LPCD_TARGET_MAX = 160;
 // The tag announcement is the one frame a tap cannot afford to lose: the base
 // drives everything else, so a dropped announcement means the card sits there
 // doing nothing until the 5 s timeout. Keep it and repeat it until the base
