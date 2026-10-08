@@ -45,8 +45,10 @@
 namespace {
 
 const char *TAG = "doorbell";
-constexpr gpio_num_t PIN_SDA = GPIO_NUM_22;  // XIAO D4
-constexpr gpio_num_t PIN_SCL = GPIO_NUM_23;  // XIAO D5
+// Production doorbell wiring; any C6 pin can carry I2C. (The first bench
+// doorbell, MAC ..8C:DC, has SDA on D4 and SCL on D5.)
+constexpr gpio_num_t PIN_SDA = GPIO_NUM_23;  // XIAO D5
+constexpr gpio_num_t PIN_SCL = GPIO_NUM_22;  // XIAO D4
 // Doorbell button: wire it between D2 and GND. GPIO0-7 are the C6's low-power
 // pins, so in a battery build this same pin wakes the chip from deep sleep
 // and a press costs one radio frame. (Not D0: that doubles as A0, where the

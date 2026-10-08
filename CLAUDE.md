@@ -225,8 +225,9 @@ request/response replies made the polling wait swallow them.
 ### Doorbell button and battery
 
 **Pins swapped 2026-10-08** to match the production doorbell (XIAO MAC
-..AE:A0:98): reader IRQ on **D1**, button on **D2**. The first bench doorbell
-(..8C:DC) is wired IRQ→D2 and needs the two `PIN_*` constants swapped back.
+..AE:A0:98): reader IRQ on **D1**, button on **D2**, and the Click's **SCL on D4, SDA on D5**.
+The first bench doorbell (..8C:DC) is wired IRQ→D2, SDA→D4, SCL→D5 and needs
+those `PIN_*` constants swapped back.
 
 
 - **Button on D2** (any momentary switch to GND; internal pull-up, debounced 50 ms).
@@ -377,8 +378,8 @@ same evening.
   so it works with **no IRQ wire** — that only matters for deep-sleep wake.
   - *M5Stack Unit NFC (bench):* Grove red→XIAO **5V** (USB only), black→GND,
     white (SDA)→D4, yellow (SCL)→D5. No IRQ on the Grove connector.
-  - *MikroE NFC 4 Click (production, 57.15 × 25.4 mm):* 3.3V, GND, SDA→D4,
-    SCL→D5, **IRQ→D1 (GPIO1)** — a low-power pin, so it can wake the
+  - *MikroE NFC 4 Click (production, 57.15 × 25.4 mm):* 3.3V, GND, SDA→D5,
+    SCL→D4, **IRQ→D1 (GPIO1)** — a low-power pin, so it can wake the
     C6 from deep sleep. Flip the `COMM SEL` SMD jumpers to I2C (ships in SPI).
     Rejected: ELECHOUSE board (40.2 mm wide, cavity is 36), NFC 5 Click
     (ST25R3918, a cut-down 3916 at the same price).
