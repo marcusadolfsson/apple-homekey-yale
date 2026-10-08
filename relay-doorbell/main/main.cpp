@@ -1303,10 +1303,17 @@ extern "C" void app_main() {
           esp_timer_get_time() - g_tagAnnouncedUs > TAG_ANNOUNCE_RETRY_US) {
         g_tagSearched = true;
         if (researchBase("tap unanswered")) {
-          g_tagActiveUs = g_tagAnnouncedUs = esp_timer_get_time();
-          g_tagAnnounceTries = 1;
-          ESP_LOGI(TAG, "re-announcing the tag to the base");
-          send(g_base, relay::Op::TagEvent, 0, 3, g_tagPayload.data(), g_tagPayload.size());
+          // Read the phone afresh rather than re-announcing the old card: its
+          // session goes stale during the search ("Not a HomeKey tag" at the
+          // base, measured 10-08, ~2 s lost before a re-detection rescued it).
+          // Deselect, and poll again at once - no field-clear wait.
+          if (g_reader) g_reader->releaseTag();
+          g_tagActive = false;
+          g_tagAnnounceTries = 0;
+          g_awaitFieldClear = false;
+          g_lpcdActiveUntilUs = esp_timer_get_time() + LPCD_ACTIVE_US;
+          g_lpcdCardSeen = false;
+          ESP_LOGI(TAG, "base found; reading the phone again");
         }
       }
       // A base that stops driving APDUs after a tap should not wedge us.

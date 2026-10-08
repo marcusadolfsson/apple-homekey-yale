@@ -344,8 +344,11 @@ does that one job and sleeps again. Build switch `DOORBELL_SLEEP` (default 1).
   2026-10-08 the Ping that found it carried no battery and the dashboard said
   "not fitted" for an hour). **Tap**: after 4 unanswered announcements (~1 s,
   the loop waits 50 ms instead of 1 s while one is outstanding) it searches
-  once per tap (`researchBase`, up to 30 s, last channel first) and announces
-  again while the phone is usually still there. **Button**: the base never
+  once per tap (`researchBase`, up to 30 s, last channel first), then
+  deselects the phone and **reads it afresh** (no field-clear wait). Re-announcing
+  the old card failed in the 10-08 test — the phone's session had gone stale
+  during the search ("Not a HomeKey tag") and only a re-detection 2 s later
+  rescued it (tap → unlock ~9 s, incl. a slow 4.4 s lock connect). **Button**: the base never
   replies to a press, so delivery is checked with ESP-NOW's own send report
   (`sendConfirmed`); undelivered → search → resend. Measured on 10-08: a base
   restart at 15:31 was only noticed at the 16:23 heartbeat (52 min) — taps in
