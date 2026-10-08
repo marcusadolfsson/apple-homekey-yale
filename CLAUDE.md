@@ -338,6 +338,18 @@ does that one job and sleeps again. Build switch `DOORBELL_SLEEP` (default 1).
   `fflush` + `fsync` + 200 ms or it is lost.
 - The relay link key is printed only when generated or with the button held at
   power-up — never on every wake.
+- **Base restarted on another channel** (its AP moved): the doorbell cannot
+  know until something goes unanswered. Heartbeat: after 3 tries it searches,
+  then **re-sends the heartbeat** so the battery reaches the base (before
+  2026-10-08 the Ping that found it carried no battery and the dashboard said
+  "not fitted" for an hour). **Tap**: after 4 unanswered announcements (~1 s,
+  the loop waits 50 ms instead of 1 s while one is outstanding) it searches
+  once per tap (`researchBase`, up to 30 s, last channel first) and announces
+  again while the phone is usually still there. **Button**: the base never
+  replies to a press, so delivery is checked with ESP-NOW's own send report
+  (`sendConfirmed`); undelivered → search → resend. Measured on 10-08: a base
+  restart at 15:31 was only noticed at the 16:23 heartbeat (52 min) — taps in
+  between would have failed.
 - **No base at power-up** (base down or out of range): on battery the search is
   bounded — 2 sweeps of 13 channels (~7 s), stretched to the 20 s cold-boot
   window — then `sleepWithoutBase()`, waking on the back-off timer (1, 2, 5,

@@ -141,6 +141,10 @@ bool g_fromSleep = false;     // this boot is a wake with valid RTC state
 bool g_wokeByNfc = false, g_wokeByButton = false, g_wokeByTimer = false;
 int64_t g_stayAwakeUntilUs = 0;
 int64_t g_lastTxUs = 0;
+// ESP-NOW's own delivery report for unicast frames (the base's radio acks
+// them). Used where the protocol has no reply, i.e. the button press.
+volatile uint32_t g_sendReports = 0;
+volatile bool g_lastSendOk = false;
 bool g_hbAcked = true;        // the last heartbeat has been answered
 int64_t g_hbAckDeadlineUs = 0;
 int g_hbTries = 0;
@@ -237,6 +241,7 @@ constexpr uint8_t LPCD_TARGET_MAX = 160;
 std::vector<uint8_t> g_tagPayload;
 int64_t g_tagAnnouncedUs = 0;
 int g_tagAnnounceTries = 0;
+bool g_tagSearched = false;  // this tap already searched for a silent base
 constexpr int64_t TAG_ANNOUNCE_RETRY_US = 250000;
 constexpr int TAG_ANNOUNCE_MAX_TRIES = 4;
 int64_t g_lastEcpReqUs = 0;
@@ -378,6 +383,11 @@ struct {
   uint16_t totalLen = 0;
   std::vector<uint8_t> buf;
 } g_asm;
+
+void onSent(const esp_now_send_info_t *, esp_now_send_status_t status) {
+  g_lastSendOk = status == ESP_NOW_SEND_SUCCESS;
+  g_sendReports = g_sendReports + 1;
+}
 
 void onRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
   if (len < (int)relay::HDR || !g_rx) return;
@@ -830,6 +840,7 @@ void pollOnce() {
   g_tagPayload = out;
   g_tagAnnouncedUs = g_tagActiveUs;
   g_tagAnnounceTries = 1;
+  g_tagSearched = false;
   send(g_base, relay::Op::TagEvent, 0, 3, out.data(), out.size());
   ++g_rtc.taps;
   g_lpcdCardSeen = true;
@@ -844,6 +855,18 @@ void pollOnce() {
   }
 }
 
+bool researchBase(const char *why);
+
+// Send one frame and wait for ESP-NOW's delivery report (a few ms; the radio
+// retries on its own before reporting a failure).
+bool sendConfirmed(relay::Op op, const std::vector<uint8_t> &payload) {
+  const uint32_t before = g_sendReports;
+  send(g_base, op, 0, 0, payload.data(), payload.size());
+  const int64_t until = esp_timer_get_time() + 150000;
+  while (g_sendReports == before && esp_timer_get_time() < until) vTaskDelay(pdMS_TO_TICKS(2));
+  return g_sendReports != before && g_lastSendOk;
+}
+
 void sendButtonPress() {
   if (!g_baseKnown) {
     ESP_LOGW(TAG, "button pressed but no base is paired");
@@ -852,7 +875,10 @@ void sendButtonPress() {
   ESP_LOGI(TAG, "button pressed; telling the base");
   std::vector<uint8_t> payload;
   appendBattery(payload, false);
-  send(g_base, relay::Op::ButtonPress, 0, 0, payload.data(), payload.size());
+  // The base sends nothing back for a press, so check delivery: after a base
+  // restart on another channel the press would otherwise vanish.
+  if (sendConfirmed(relay::Op::ButtonPress, payload)) return;
+  if (researchBase("button press not delivered")) sendConfirmed(relay::Op::ButtonPress, payload);
 }
 
 // Debounced press detection while awake. When asleep, the same pin wakes the
@@ -984,6 +1010,30 @@ void findBase(int rounds = 0) {
   }
 }
 
+// The base did not answer something a person is waiting on (a tap, the
+// button): it probably restarted on another channel. Search now, for up to
+// BASE_SEARCH_ATTENDED_US, last known channel first, instead of failing the
+// tap and leaving it to the next heartbeat - up to an hour away. If it stays
+// silent, keep the pinned base and its channel.
+bool researchBase(const char *why) {
+  const uint8_t lastChannel = g_channel;
+  ESP_LOGW(TAG, "%s; searching for the base", why);
+  g_baseKnown = false;
+  const int64_t until = esp_timer_get_time() + BASE_SEARCH_ATTENDED_US;
+  while (!g_baseKnown && esp_timer_get_time() < until) findBase(1);
+  if (g_baseKnown) {
+    if (g_channel != lastChannel) ESP_LOGI(TAG, "base moved from channel %u to %u", lastChannel, g_channel);
+    return true;
+  }
+  if (g_basePinned) {
+    g_baseKnown = true;
+    g_channel = lastChannel;
+    esp_wifi_set_channel(g_channel, WIFI_SECOND_CHAN_NONE);
+  }
+  ESP_LOGW(TAG, "base still unreachable; keeping channel %u", g_channel);
+  return false;
+}
+
 }  // namespace
 
 // The XIAO ESP32C6 routes its antenna through an RF switch: GPIO3 low enables
@@ -1049,6 +1099,7 @@ extern "C" void app_main() {
   ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
   ESP_ERROR_CHECK(esp_now_init());
   ESP_ERROR_CHECK(esp_now_register_recv_cb(onRecv));
+  ESP_ERROR_CHECK(esp_now_register_send_cb(onSent));
   addPeer(BROADCAST);
 
   uint8_t mac[6];
@@ -1144,8 +1195,13 @@ extern "C" void app_main() {
     // Between poll cycles we sit on the queue for the configured gap, which
     // both paces the reader like the base's own loop and keeps us responsive to
     // anything the base sends.
-    const TickType_t wait =
-        (g_haveEcp && !g_tagActive) ? pdMS_TO_TICKS(g_pollDelayMs) : pdMS_TO_TICKS(1000);
+    // While a tap is announced but unanswered, wake often enough to repeat the
+    // announcement every TAG_ANNOUNCE_RETRY_US (with a 1 s wait the 2 s
+    // fallback below won before the last try, so a silent base was never
+    // noticed).
+    const TickType_t wait = (g_haveEcp && !g_tagActive)          ? pdMS_TO_TICKS(g_pollDelayMs)
+                            : (g_tagActive && g_tagAnnounceTries > 0) ? pdMS_TO_TICKS(50)
+                                                                      : pdMS_TO_TICKS(1000);
     if (xQueueReceive(g_rx, &m, wait) != pdTRUE) {
       checkButton();
       // A quiet doorbell is indistinguishable from a dead one, so say hello
@@ -1237,6 +1293,21 @@ extern "C" void app_main() {
         ++g_tagAnnounceTries;
         ESP_LOGW(TAG, "no APDU yet; re-announcing the tag (try %d)", g_tagAnnounceTries);
         send(g_base, relay::Op::TagEvent, 0, 3, g_tagPayload.data(), g_tagPayload.size());
+      }
+      // Every announcement unanswered: the base is not on this channel any
+      // more (restarted, or its AP moved). Search once per tap and announce
+      // again; the phone is usually still on the reader. (A base busy with the
+      // lock also stays silent, but it answers the search ping at once on the
+      // same channel, so that costs a few ms, and then the 2 s fallback below.)
+      if (g_tagActive && !g_tagSearched && g_tagAnnounceTries >= TAG_ANNOUNCE_MAX_TRIES &&
+          esp_timer_get_time() - g_tagAnnouncedUs > TAG_ANNOUNCE_RETRY_US) {
+        g_tagSearched = true;
+        if (researchBase("tap unanswered")) {
+          g_tagActiveUs = g_tagAnnouncedUs = esp_timer_get_time();
+          g_tagAnnounceTries = 1;
+          ESP_LOGI(TAG, "re-announcing the tag to the base");
+          send(g_base, relay::Op::TagEvent, 0, 3, g_tagPayload.data(), g_tagPayload.size());
+        }
       }
       // A base that stops driving APDUs after a tap should not wedge us.
       // Fallback only: the base releases us explicitly. Auth completes in
