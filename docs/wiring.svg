@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 990" width="1100" height="990" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+<rect width="1100" height="990" fill="#ffffff"/>
+<text x="40" y="44" font-size="22" text-anchor="start" font-weight="600" fill="#1f2328">Doorbell wiring – production board</text>
+<text x="40" y="68" font-size="13" text-anchor="start" font-weight="400" fill="#57606a">Seeed XIAO ESP32C6 + MikroE NFC 4 Click (ST25R3916, reworked to I2C) + 1S LiPo. Pins as in relay-doorbell firmware, 2026-10-08.</text>
+<rect x="450" y="150" width="200" height="470" rx="14" fill="#2d333b" stroke="#1f2328" stroke-width="2"/>
+<rect x="520.0" y="128" width="60" height="30" rx="5" fill="#afb8c1" stroke="#57606a" stroke-width="1.5"/>
+<text x="550.0" y="148" font-size="11" text-anchor="middle" font-weight="600" fill="#24292f">USB-C</text>
+<text x="550.0" y="184" font-size="16" text-anchor="middle" font-weight="600" fill="#ffffff">XIAO ESP32C6</text>
+<text x="550.0" y="204" font-size="12" text-anchor="middle" font-weight="400" fill="#adbac7" font-style="italic">top view</text>
+<circle cx="450" cy="245" r="7" fill="#d4a72c"/>
+<text x="464" y="250" font-size="14" text-anchor="start" font-weight="600" fill="#ffffff">D0</text>
+<text x="496" y="250" font-size="10" text-anchor="start" font-weight="400" fill="#adbac7">A0 / GPIO0</text>
+<circle cx="450" cy="303" r="7" fill="#d4a72c"/>
+<text x="464" y="308" font-size="14" text-anchor="start" font-weight="600" fill="#ffffff">D1</text>
+<text x="496" y="308" font-size="10" text-anchor="start" font-weight="400" fill="#adbac7">GPIO1</text>
+<circle cx="450" cy="361" r="7" fill="#d4a72c"/>
+<text x="464" y="366" font-size="14" text-anchor="start" font-weight="600" fill="#ffffff">D2</text>
+<text x="496" y="366" font-size="10" text-anchor="start" font-weight="400" fill="#adbac7">GPIO2</text>
+<circle cx="450" cy="419" r="7" fill="#d4a72c"/>
+<text x="464" y="424" font-size="14" text-anchor="start" font-weight="600" fill="#ffffff">D3</text>
+<text x="496" y="424" font-size="10" text-anchor="start" font-weight="400" fill="#adbac7">GPIO21</text>
+<circle cx="450" cy="477" r="7" fill="#d4a72c"/>
+<text x="464" y="482" font-size="14" text-anchor="start" font-weight="600" fill="#ffffff">D4</text>
+<text x="496" y="482" font-size="10" text-anchor="start" font-weight="400" fill="#adbac7">GPIO22</text>
+<circle cx="450" cy="535" r="7" fill="#d4a72c"/>
+<text x="464" y="540" font-size="14" text-anchor="start" font-weight="600" fill="#ffffff">D5</text>
+<text x="496" y="540" font-size="10" text-anchor="start" font-weight="400" fill="#adbac7">GPIO23</text>
+<circle cx="450" cy="593" r="7" fill="#d4a72c"/>
+<text x="464" y="598" font-size="14" text-anchor="start" font-weight="600" fill="#ffffff">D6</text>
+<text x="496" y="598" font-size="10" text-anchor="start" font-weight="400" fill="#adbac7">GPIO16</text>
+<circle cx="650" cy="245" r="7" fill="#d4a72c"/>
+<text x="636" y="250" font-size="14" text-anchor="end" font-weight="600" fill="#ffffff">5V</text>
+<circle cx="650" cy="303" r="7" fill="#d4a72c"/>
+<text x="636" y="308" font-size="14" text-anchor="end" font-weight="600" fill="#ffffff">GND</text>
+<circle cx="650" cy="361" r="7" fill="#d4a72c"/>
+<text x="636" y="366" font-size="14" text-anchor="end" font-weight="600" fill="#ffffff">3V3</text>
+<circle cx="650" cy="419" r="7" fill="#d4a72c"/>
+<text x="636" y="424" font-size="14" text-anchor="end" font-weight="600" fill="#ffffff">D10</text>
+<text x="602" y="424" font-size="10" text-anchor="end" font-weight="400" fill="#adbac7">GPIO18</text>
+<circle cx="650" cy="477" r="7" fill="#d4a72c"/>
+<text x="636" y="482" font-size="14" text-anchor="end" font-weight="600" fill="#ffffff">D9</text>
+<text x="602" y="482" font-size="10" text-anchor="end" font-weight="400" fill="#adbac7">GPIO20</text>
+<circle cx="650" cy="535" r="7" fill="#d4a72c"/>
+<text x="636" y="540" font-size="14" text-anchor="end" font-weight="600" fill="#ffffff">D8</text>
+<text x="602" y="540" font-size="10" text-anchor="end" font-weight="400" fill="#adbac7">GPIO19</text>
+<circle cx="650" cy="593" r="7" fill="#d4a72c"/>
+<text x="636" y="598" font-size="14" text-anchor="end" font-weight="600" fill="#ffffff">D7</text>
+<text x="602" y="598" font-size="10" text-anchor="end" font-weight="400" fill="#adbac7">GPIO17</text>
+<line x1="360" y1="245" x2="442" y2="245" stroke="#bc4c00" stroke-width="3" stroke-linecap="round"/>
+<rect x="60" y="221" width="300" height="48" rx="6" fill="#fff1e5" stroke="#bc4c00" stroke-width="1.5"/>
+<text x="72" y="241" font-size="14" text-anchor="start" font-weight="600" fill="#bc4c00">Battery sense</text>
+<text x="72" y="260" font-size="12" text-anchor="start" font-weight="400" fill="#424a53">junction of R1, R2, C1 (divider below)</text>
+<line x1="360" y1="303" x2="442" y2="303" stroke="#8250df" stroke-width="3" stroke-linecap="round"/>
+<rect x="60" y="279" width="300" height="48" rx="6" fill="#fbefff" stroke="#8250df" stroke-width="1.5"/>
+<text x="72" y="299" font-size="14" text-anchor="start" font-weight="600" fill="#8250df">NFC 4 Click: IRQ</text>
+<text x="72" y="318" font-size="12" text-anchor="start" font-weight="400" fill="#424a53">wakes the doorbell when a phone arrives</text>
+<line x1="360" y1="361" x2="442" y2="361" stroke="#1a7f37" stroke-width="3" stroke-linecap="round"/>
+<rect x="60" y="337" width="300" height="48" rx="6" fill="#dafbe1" stroke="#1a7f37" stroke-width="1.5"/>
+<text x="72" y="357" font-size="14" text-anchor="start" font-weight="600" fill="#1a7f37">Doorbell button</text>
+<text x="72" y="376" font-size="12" text-anchor="start" font-weight="400" fill="#424a53">other leg to GND; diagonal pins on a 4-pin switch</text>
+<text x="430" y="424" font-size="12" text-anchor="end" font-weight="400" fill="#8c959f" font-style="italic">not used</text>
+<line x1="360" y1="477" x2="442" y2="477" stroke="#0969da" stroke-width="3" stroke-linecap="round"/>
+<rect x="60" y="453" width="300" height="48" rx="6" fill="#ddf4ff" stroke="#0969da" stroke-width="1.5"/>
+<text x="72" y="473" font-size="14" text-anchor="start" font-weight="600" fill="#0969da">NFC 4 Click: SCL</text>
+<text x="72" y="492" font-size="12" text-anchor="start" font-weight="400" fill="#424a53">I2C clock</text>
+<line x1="360" y1="535" x2="442" y2="535" stroke="#0969da" stroke-width="3" stroke-linecap="round"/>
+<rect x="60" y="511" width="300" height="48" rx="6" fill="#ddf4ff" stroke="#0969da" stroke-width="1.5"/>
+<text x="72" y="531" font-size="14" text-anchor="start" font-weight="600" fill="#0969da">NFC 4 Click: SDA</text>
+<text x="72" y="550" font-size="12" text-anchor="start" font-weight="400" fill="#424a53">I2C data</text>
+<text x="430" y="598" font-size="12" text-anchor="end" font-weight="400" fill="#8c959f" font-style="italic">not used</text>
+<text x="670" y="250" font-size="12" text-anchor="start" font-weight="400" fill="#8c959f" font-style="italic">not used</text>
+<line x1="658" y1="303" x2="730" y2="303" stroke="#1f2328" stroke-width="3" stroke-linecap="round"/>
+<rect x="730" y="279" width="330" height="48" rx="6" fill="#f6f8fa" stroke="#1f2328" stroke-width="1.5"/>
+<text x="742" y="299" font-size="14" text-anchor="start" font-weight="600" fill="#1f2328">GND (shared)</text>
+<text x="742" y="318" font-size="12" text-anchor="start" font-weight="400" fill="#424a53">Click GND, button, R2 + C1: splice here</text>
+<line x1="658" y1="361" x2="730" y2="361" stroke="#cf222e" stroke-width="3" stroke-linecap="round"/>
+<rect x="730" y="337" width="330" height="48" rx="6" fill="#ffebe9" stroke="#cf222e" stroke-width="1.5"/>
+<text x="742" y="357" font-size="14" text-anchor="start" font-weight="600" fill="#cf222e">NFC 4 Click: 3V3</text>
+<text x="742" y="376" font-size="12" text-anchor="start" font-weight="400" fill="#424a53">the Click runs from the XIAO's 3.3 V</text>
+<text x="670" y="424" font-size="12" text-anchor="start" font-weight="400" fill="#8c959f" font-style="italic">not used</text>
+<text x="670" y="482" font-size="12" text-anchor="start" font-weight="400" fill="#8c959f" font-style="italic">not used</text>
+<text x="670" y="540" font-size="12" text-anchor="start" font-weight="400" fill="#8c959f" font-style="italic">not used</text>
+<text x="670" y="598" font-size="12" text-anchor="start" font-weight="400" fill="#8c959f" font-style="italic">not used</text>
+<rect x="478" y="642" width="64" height="28" rx="4" fill="#ffebe9" stroke="#cf222e" stroke-width="1.5" stroke-dasharray="5 3"/>
+<text x="510" y="661" font-size="13" text-anchor="middle" font-weight="600" fill="#cf222e">BAT+</text>
+<rect x="558" y="642" width="64" height="28" rx="4" fill="#f6f8fa" stroke="#1f2328" stroke-width="1.5" stroke-dasharray="5 3"/>
+<text x="590" y="661" font-size="13" text-anchor="middle" font-weight="600" fill="#1f2328">BAT−</text>
+<text x="466" y="661" font-size="12" text-anchor="end" font-weight="400" fill="#57606a" font-style="italic">underside pads</text>
+<rect x="730" y="634" width="330" height="76" rx="8" fill="#f6f8fa" stroke="#57606a" stroke-width="1.5"/>
+<text x="744" y="658" font-size="14" text-anchor="start" font-weight="600" fill="#1f2328">LiPo cell, 1S (e.g. 503450)</text>
+<text x="744" y="678" font-size="12" text-anchor="start" font-weight="400" fill="#424a53">JST-PH pigtail: red to BAT+, black to BAT−</text>
+<text x="744" y="696" font-size="12" text-anchor="start" font-weight="400" fill="#cf222e">check the plug's polarity before connecting</text>
+<polyline points="510,670 510,712 706,712 706,690 730,690" fill="none" stroke="#cf222e" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="590,670 590,694 690,694 690,660 730,660" fill="none" stroke="#1f2328" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<rect x="40" y="750" width="480" height="210" rx="10" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+<text x="56" y="776" font-size="15" text-anchor="start" font-weight="600" fill="#1f2328">Battery divider (on D0)</text>
+<text x="56" y="796" font-size="12" text-anchor="start" font-weight="400" fill="#57606a">full 4.2 V reads 2.1 V at D0; draws ~2 µA; no part has a polarity</text>
+<text x="70" y="829" font-size="13" text-anchor="start" font-weight="600" fill="#cf222e">BAT+</text>
+<line x1="110" y1="824" x2="190" y2="824" stroke="#cf222e" stroke-width="2.5" stroke-linecap="round"/>
+<line x1="190" y1="824" x2="190" y2="834" stroke="#cf222e" stroke-width="2.5" stroke-linecap="round"/>
+<rect x="181" y="834" width="18" height="36" rx="2" fill="#eaeef2" stroke="#57606a" stroke-width="1.5"/>
+<line x1="190" y1="870" x2="190" y2="894" stroke="#bc4c00" stroke-width="2.5" stroke-linecap="round"/>
+<text x="206" y="857" font-size="12" text-anchor="start" font-weight="400" fill="#1f2328">R1  1 MΩ</text>
+<circle cx="190" cy="884" r="4" fill="#1f2328"/>
+<line x1="190" y1="884" x2="340" y2="884" stroke="#bc4c00" stroke-width="2.5" stroke-linecap="round"/>
+<text x="346" y="889" font-size="13" text-anchor="start" font-weight="600" fill="#bc4c00">to D0</text>
+<rect x="181" y="894" width="18" height="36" rx="2" fill="#eaeef2" stroke="#57606a" stroke-width="1.5"/>
+<line x1="190" y1="884" x2="190" y2="894" stroke="#bc4c00" stroke-width="2.5" stroke-linecap="round"/>
+<text x="206" y="917" font-size="12" text-anchor="start" font-weight="400" fill="#1f2328">R2  1 MΩ</text>
+<circle cx="300" cy="884" r="4" fill="#1f2328"/>
+<line x1="300" y1="884" x2="300" y2="906" stroke="#bc4c00" stroke-width="2.5" stroke-linecap="round"/>
+<line x1="286" y1="906" x2="314" y2="906" stroke="#1f2328" stroke-width="2.5" stroke-linecap="round"/>
+<line x1="286" y1="914" x2="314" y2="914" stroke="#1f2328" stroke-width="2.5" stroke-linecap="round"/>
+<text x="322" y="915" font-size="12" text-anchor="start" font-weight="400" fill="#1f2328">C1  100 nF</text>
+<line x1="190" y1="930" x2="190" y2="940" stroke="#1f2328" stroke-width="2.5" stroke-linecap="round"/>
+<line x1="300" y1="914" x2="300" y2="940" stroke="#1f2328" stroke-width="2.5" stroke-linecap="round"/>
+<line x1="190" y1="940" x2="300" y2="940" stroke="#1f2328" stroke-width="2.5" stroke-linecap="round"/>
+<text x="230" y="956" font-size="13" text-anchor="start" font-weight="600" fill="#1f2328">GND</text>
+<rect x="560" y="750" width="500" height="210" rx="10" fill="#ffffff" stroke="#d0d7de" stroke-width="1.5"/>
+<text x="576" y="776" font-size="15" text-anchor="start" font-weight="600" fill="#1f2328">Stack-up in the doorbell, outside to inside</text>
+<rect x="576" y="792" width="468" height="26" rx="4" fill="#eaeef2" stroke="#8c959f" stroke-width="1.5"/>
+<text x="588" y="810" font-size="12" text-anchor="start" font-weight="400" fill="#1f2328">doorbell's plastic cover</text>
+<rect x="576" y="824" width="468" height="26" rx="4" fill="#dafbe1" stroke="#8c959f" stroke-width="1.5"/>
+<text x="588" y="842" font-size="12" text-anchor="start" font-weight="400" fill="#1f2328">NFC 4 Click – printed spiral side facing out</text>
+<rect x="576" y="856" width="468" height="26" rx="4" fill="#d0d7de" stroke="#8c959f" stroke-width="1.5"/>
+<text x="588" y="874" font-size="12" text-anchor="start" font-weight="400" fill="#1f2328">ferrite sheet – antenna area only, against the Click</text>
+<rect x="576" y="888" width="468" height="26" rx="4" fill="#ddf4ff" stroke="#8c959f" stroke-width="1.5"/>
+<text x="588" y="906" font-size="12" text-anchor="start" font-weight="400" fill="#1f2328">XIAO + battery behind the chip half</text>
+<text x="576" y="946" font-size="11" text-anchor="start" font-weight="400" fill="#57606a" font-style="italic">keep the XIAO's small ceramic antenna clear of the battery, ferrite and metal</text>
+</svg>
