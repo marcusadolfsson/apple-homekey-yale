@@ -224,8 +224,13 @@ request/response replies made the polling wait swallow them.
 
 ### Doorbell button and battery
 
-- **Button on D1** (any momentary switch to GND; internal pull-up, debounced 50 ms).
-  D1 is a low-power pin, so in a battery build the same wire wakes the chip from
+**Pins swapped 2026-10-08** to match the production doorbell (XIAO MAC
+..AE:A0:98): reader IRQ on **D1**, button on **D2**. The first bench doorbell
+(..8C:DC) is wired IRQ→D2 and needs the two `PIN_*` constants swapped back.
+
+
+- **Button on D2** (any momentary switch to GND; internal pull-up, debounced 50 ms).
+  D2 is a low-power pin, so in a battery build the same wire wakes the chip from
   deep sleep and a press costs one wake plus one frame.
 - **Battery on A0/D0** through a 1:2 divider. Use 1 MΩ + 1 MΩ (~2 µA), not Seeed's
   suggested 200 kΩ pair (~10 µA — half the idle budget). Reported as 0 when absent.
@@ -251,7 +256,7 @@ request/response replies made the polling wait swallow them.
 The doorbell no longer polls ~15 times a second with the field on. Its reader
 rests in the ST25R3916's wake-up mode (oscillator off, the chip sampling the
 antenna every `LPCD_PERIOD_MS` = 100 ms); a phone moves the reading, the chip
-raises IRQ on **D2 (GPIO2)**, and only then does the doorbell poll, for
+raises IRQ on **D1 (GPIO1)**, and only then does the doorbell poll, for
 `LPCD_ACTIVE_US` (1.5 s), re-arming once the field is clear. The reference is
 re-taken every 60 s. Build switch `DOORBELL_LPCD` (default 1); ST25R3916 only.
 The C6 itself is still awake — deep sleep is stage 2. Driver API:
@@ -288,7 +293,7 @@ in RTC memory.
 ### Deep sleep between events — stage 2, 2026-10-06
 
 The C6 now sleeps (7 µA) while the ST25R3916 sits in wake-up mode. It wakes on
-**D2 high** (reader IRQ: a phone), **D1 low** (button) or the **heartbeat timer**,
+**D1 high** (reader IRQ: a phone), **D2 low** (button) or the **heartbeat timer**,
 does that one job and sleeps again. Build switch `DOORBELL_SLEEP` (default 1).
 
 - **What survives sleep** (`RtcState`, `RTC_DATA_ATTR`, POD only): pinned base
@@ -310,7 +315,7 @@ does that one job and sleeps again. Build switch `DOORBELL_SLEEP` (default 1).
   is present or the field not yet clear, the button is held, IRQ is high, a
   heartbeat is unacked, or a frame left < 50 ms ago. The reference is re-taken
   hourly (on a wake), not every minute as when awake.
-- **Pins in sleep**: IDF holds LP pad pulls; D1 pull-up, D2 pull-down, ext1 per
+- **Pins in sleep**: IDF holds LP pad pulls; button (D2) pull-up, IRQ (D1) pull-down, ext1 per
   pin level (`esp_sleep_enable_ext1_wakeup_io`). After waking,
   `rtc_gpio_hold_dis` + `rtc_gpio_deinit` on both before normal GPIO use.
 - **Working on it over USB**: the default build *does not sleep while a USB host
@@ -373,7 +378,7 @@ same evening.
   - *M5Stack Unit NFC (bench):* Grove red→XIAO **5V** (USB only), black→GND,
     white (SDA)→D4, yellow (SCL)→D5. No IRQ on the Grove connector.
   - *MikroE NFC 4 Click (production, 57.15 × 25.4 mm):* 3.3V, GND, SDA→D4,
-    SCL→D5, **IRQ (INT pin)→D2 (GPIO2)** — a low-power pin, so it can wake the
+    SCL→D5, **IRQ→D1 (GPIO1)** — a low-power pin, so it can wake the
     C6 from deep sleep. Flip the `COMM SEL` SMD jumpers to I2C (ships in SPI).
     Rejected: ELECHOUSE board (40.2 mm wide, cavity is 36), NFC 5 Click
     (ST25R3918, a cut-down 3916 at the same price).
@@ -515,7 +520,7 @@ headers replaced by wires; see `docs/nfc4-click-rework.pdf`). It identified as
 relayed **endpoint authentication dropped to 86–96 ms**, about half the PN532's.
 **Express mode confirmed on the Click** (phone locked, no Wallet: the Home Key
 animation appears) - the ST25R3916's ECP path works on our hardware.
-IRQ on D2 wakes the doorbell from deep sleep (stage 2, see Hardware). Both
+IRQ on D1 wakes the doorbell from deep sleep (stage 2, see Hardware). Both
 boards recover pairing on their own after either restarts or the AP changes
 channel. Dashboard shows pairing, link RSSI, reader-ready and doorbell battery;
 MQTT publishes the button and battery with HA discovery. Doorbell button and

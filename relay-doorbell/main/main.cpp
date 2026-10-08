@@ -4,8 +4,8 @@
 // encrypted and pinned by MAC.
 //
 // With the ST25R3916 the doorbell deep-sleeps between events (DOORBELL_SLEEP):
-// the reader sits in its own low-power wake-up mode and raises IRQ (D2) when a
-// phone arrives; the button (D1) and an hourly heartbeat timer are the other
+// the reader sits in its own low-power wake-up mode and raises IRQ (D1) when a
+// phone arrives; the button (D2) and an hourly heartbeat timer are the other
 // wake sources. State that has to survive the sleep lives in RTC memory.
 #include "DoorbellPn532Reader.hpp"
 #include "NfcReader.hpp"
@@ -47,14 +47,14 @@ namespace {
 const char *TAG = "doorbell";
 constexpr gpio_num_t PIN_SDA = GPIO_NUM_22;  // XIAO D4
 constexpr gpio_num_t PIN_SCL = GPIO_NUM_23;  // XIAO D5
-// Doorbell button: wire it between D1 and GND. GPIO0-7 are the C6's low-power
+// Doorbell button: wire it between D2 and GND. GPIO0-7 are the C6's low-power
 // pins, so in a battery build this same pin wakes the chip from deep sleep
 // and a press costs one radio frame. (Not D0: that doubles as A0, where the
 // battery divider lands.)
-constexpr gpio_num_t PIN_BUTTON = GPIO_NUM_1;  // XIAO D1
+constexpr gpio_num_t PIN_BUTTON = GPIO_NUM_2;  // XIAO D2
 // ST25R3916 IRQ, push-pull from the chip. Also a low-power pin, so the same
 // wire is what wakes the C6 from deep sleep when a phone arrives.
-constexpr gpio_num_t PIN_NFC_IRQ = GPIO_NUM_2;  // XIAO D2
+constexpr gpio_num_t PIN_NFC_IRQ = GPIO_NUM_1;  // XIAO D1 (the first bench doorbell, MAC ..8C:DC, had it on D2)
 // Battery sense on A0/D0 through a 1:2 divider (1M + 1M keeps the idle draw
 // near 2 uA; Seeed's suggested 200k pair would waste ~10 uA, half our budget).
 constexpr adc_channel_t BATTERY_CHANNEL = ADC_CHANNEL_0;  // GPIO0 on the C6
@@ -145,7 +145,7 @@ uint8_t g_channel = 0;
 
 // Which NFC front end is wired up. Compile-time default, overridable from NVS
 // (namespace "relay", u8 "reader") so a board can be switched without a rebuild.
-// Both sit on the same I2C pins; only the ST25R3916 has an IRQ line (D2) and the
+// Both sit on the same I2C pins; only the ST25R3916 has an IRQ line (D1) and the
 // low-power card detection a battery build needs.
 enum class ReaderKind : uint8_t { Pn532 = 0, St25r3916 = 1 };
 #ifndef DOORBELL_DEFAULT_READER
@@ -180,7 +180,7 @@ int g_fieldClearPolls = 0;
 
 // Low-power card detection (LPCD). Instead of polling ~15 times a second with
 // the field on, the ST25R3916 rests in its wake-up mode, sampling the antenna
-// every LPCD_PERIOD_MS, and raises IRQ (D2) when a phone loads it. Only then
+// every LPCD_PERIOD_MS, and raises IRQ (D1) when a phone loads it. Only then
 // does the doorbell poll, for LPCD_ACTIVE_US, before re-arming once the field
 // is clear. Stage 1 of the battery work: the C6 itself still stays awake.
 #ifndef DOORBELL_LPCD
@@ -629,7 +629,7 @@ bool lpcdGate() {
   }
   if (!irqLine && now - g_lpcdLastWarnUs > 10000000) {
     g_lpcdLastWarnUs = now;
-    ESP_LOGW(TAG, "wake-up found by register check, but the IRQ line on D2 stayed low - check that wire");
+    ESP_LOGW(TAG, "wake-up found by register check, but the IRQ line on D1 stayed low - check that wire");
   }
   g_st->stopWakeUpMode();
   ++g_lpcdWakes;
