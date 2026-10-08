@@ -92,7 +92,10 @@ constexpr int64_t LPCD_REARM_SLEEP_US = 3600000000LL;  // refresh the reference 
 // sleep and try again later, backing off. Searching costs ~80 mA; doing it
 // without a limit would flatten the battery in a day.
 constexpr int BASE_SEARCH_ROUNDS = 2;  // ~6.5 s: 13 channels x 250 ms, twice
-constexpr int64_t BASE_SEARCH_BACKOFF_S[] = {60, 120, 300, 600, 1800, 3600};
+// Taps also wake a doorbell without a base (see sleepWithoutBase), so the
+// timer only matters when nobody is at the door; 15 min caps how long the
+// base's dashboard shows it missing after an outage.
+constexpr int64_t BASE_SEARCH_BACKOFF_S[] = {60, 120, 300, 600, 900};
 constexpr int64_t BASE_SEARCH_BACKOFF_TEST_S = 30;  // sleep-on-USB bench build
 constexpr int64_t BUTTON_REPEAT_US = 1000000;  // ignore chatter/held button
 const uint8_t BROADCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -119,9 +122,10 @@ struct RtcState {
   uint32_t wakes, nfcWakes, buttonWakes, timerWakes, taps;
   uint8_t baseLost;     // asleep because no base answered: search again on waking
   uint8_t searchFails;  // consecutive failed searches, for the back-off
+  uint8_t dresSwept;    // `dres` holds this power-up's sweep result
 };
 RTC_DATA_ATTR RtcState g_rtc;
-constexpr uint32_t RTC_MAGIC = 0xD00B5702;
+constexpr uint32_t RTC_MAGIC = 0xD00B5703;
 
 // Keeps counting through deep sleep, unlike esp_timer_get_time().
 int64_t rtcNowUs() {
@@ -679,21 +683,40 @@ void flushConsoleBeforeSleep() {
   vTaskDelay(pdMS_TO_TICKS(200));
 }
 
-// No base answered. Nothing to serve taps for, so the reader is powered down
-// and only the timer (back-off) or the button (try again now) wakes us.
+// No base answered. Sleep until the back-off timer, the button, or a tap: the
+// reader keeps watching for phones, so someone at the door makes the doorbell
+// search again at once (last known channel first, usually one ping), and if
+// the base is back, the phone still on the reader is served on the same wake.
+// Without a working reader it is powered down and only timer and button wake.
 [[noreturn]] void sleepWithoutBase() {
   g_rtc.magic = RTC_MAGIC;
   g_rtc.baseLost = 1;
   g_rtc.readerInWakeUp = 0;
   if (g_rtc.searchFails < 255) ++g_rtc.searchFails;
-  if (g_st) g_st->powerDown();
-  armWakePins(false);
+  bool nfcWake = false;
+  if (DOORBELL_LPCD && g_st && g_readerReady) {
+    if (g_st->inWakeUpMode()) g_st->takeWakeUpEvents();  // drop the tap that woke us
+    if (!g_st->inWakeUpMode() || gpio_get_level(PIN_NFC_IRQ) != 0) {
+      if (g_st->inWakeUpMode()) g_st->stopWakeUpMode();
+      lpcdArm();  // sweeps the drive first if this power-up has not yet
+    }
+    nfcWake = g_st->inWakeUpMode() && gpio_get_level(PIN_NFC_IRQ) == 0;
+  }
+  if (nfcWake) {
+    g_rtc.readerInWakeUp = 1;
+    g_rtc.wu = g_st->wakeUpPersist();
+    g_rtc.dres = g_lpcdDres;
+    g_rtc.dresSwept = 1;
+  } else if (g_st) {
+    g_st->powerDown();
+  }
+  armWakePins(nfcWake);
   constexpr int steps = sizeof(BASE_SEARCH_BACKOFF_S) / sizeof(BASE_SEARCH_BACKOFF_S[0]);
   const int64_t waitS = DOORBELL_SLEEP_ON_USB ? BASE_SEARCH_BACKOFF_TEST_S
                                               : BASE_SEARCH_BACKOFF_S[std::min<int>(g_rtc.searchFails, steps) - 1];
   esp_sleep_enable_timer_wakeup(uint64_t(waitS) * 1000000);
   ESP_LOGW(TAG, "no base station found (%u searches in a row); sleeping, next search in %lld s "
-                "or when the button is pressed", g_rtc.searchFails, waitS);
+                "or on the button%s", g_rtc.searchFails, waitS, nfcWake ? " or a tap" : "");
   flushConsoleBeforeSleep();
   esp_deep_sleep_start();
 }
@@ -706,6 +729,7 @@ void flushConsoleBeforeSleep() {
   g_rtc.listenMs = g_listenMs;
   g_rtc.pollDelayMs = g_pollDelayMs;
   g_rtc.dres = g_lpcdDres;
+  g_rtc.dresSwept = 1;
   g_rtc.readerInWakeUp = 1;
   g_rtc.wu = g_st->wakeUpPersist();
 
@@ -1072,10 +1096,15 @@ extern "C" void app_main() {
     g_listenMs = g_rtc.listenMs;
     g_pollDelayMs = g_rtc.pollDelayMs;
     g_haveEcp = true;
+  }
+  if (g_fromSleep && g_rtc.dresSwept) {
     g_lpcdDres = g_rtc.dres;
     g_lpcdSwept = true;
   }
-  const bool resumed = resumeLink && g_rtc.readerInWakeUp &&
+  // Also after a base-less sleep: a tap woke us, and resuming (rather than
+  // resetting) the reader keeps that wake-up event, so the phone is polled as
+  // soon as the base answers and sends the ECP frame.
+  const bool resumed = g_fromSleep && g_rtc.readerInWakeUp &&
                        g_readerKind == ReaderKind::St25r3916 && readerResume();
   if (!resumed && !readerInit()) ESP_LOGE(TAG, "continuing without a working NFC reader");
   if (!resumeLink) {

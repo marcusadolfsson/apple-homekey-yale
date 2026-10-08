@@ -337,9 +337,15 @@ does that one job and sleeps again. Build switch `DOORBELL_SLEEP` (default 1).
   power-up — never on every wake.
 - **No base at power-up** (base down or out of range): on battery the search is
   bounded — 2 sweeps of 13 channels (~7 s), stretched to the 20 s cold-boot
-  window — then `sleepWithoutBase()`: reader in power-down (`powerDown()`),
-  wake on the timer or the button only, back-off 1, 2, 5, 10, 30, 60 min
-  (`BASE_SEARCH_BACKOFF_S`; 30 s in the bench build). A wake with
+  window — then `sleepWithoutBase()`, waking on the back-off timer (1, 2, 5,
+  10, then every 15 min; `BASE_SEARCH_BACKOFF_S`; 30 s in the bench build), the
+  button, **or a tap**: the reader stays in wake-up mode, a tap wakes the
+  doorbell, it searches (last known channel first, usually one ping), and with
+  the reader *resumed* rather than reset the wake-up event survives, so the
+  phone still on the reader is served on that same wake once the ECP frame
+  arrives. (Until 2026-10-08 the reader was powered down and only the timer —
+  up to 60 min — or the button woke it: after a base outage taps did nothing
+  for up to an hour.) Without a working reader it is still powered down. A wake with
   `RtcState::baseLost` searches again like a cold boot. Tested by holding the
   base in its bootloader: 20 s search, sleep, 7 s retries, and found on the first
   retry after the base came back. On a computer's USB it still searches without
