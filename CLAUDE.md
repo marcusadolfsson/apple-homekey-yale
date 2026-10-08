@@ -269,7 +269,7 @@ The C6 itself is still awake — deep sleep is stage 2. Driver API:
    A phone could not pull it into range: two minutes of taps, zero wake-ups. Wake-up
    mode now runs with a weaker field (TX_DRIVER 0x28, `d_res`), restored to full
    drive for polling. A sweep at first arm picks the strongest drive whose reading
-   is ≤ 200: `0:255 1:255 2:217 3:139 4:139 5–14:75 15:42` → **d_res 3, ~139**,
+   is ≤ 160 (was 200, see below): `0:255 1:255 2:217 3:139 4:139 5–14:75 15:42` → **d_res 3, ~139**,
    identical on repeat boots.
 2. **Take the reference from wake-up mode itself.** RFAL takes it with the
    measure command, which disagreed with the mode's own readings (238–251 vs a
@@ -278,6 +278,12 @@ The C6 itself is still awake — deep sleep is stage 2. Driver API:
    average, then tighten the delta, without leaving the mode.
 3. **Phase reads 0 throughout** on this board, so detection is amplitude-only
    (RFAL's default is too).
+   **Ferrite changes this (production Click, 2026-10-08):** with an NFC ferrite
+   sheet behind the antenna, full drive reads only ~180, so the 200 cap chose
+   full drive — and it false-woke every 1–2 s: each re-arm right after polling
+   took a reference the reading crept 3 steps above. Capped at 160 → d_res 2
+   (~146): 0 false wake-ups idle or after taps, 3/3 taps found 178–234 ms after
+   wake-up.
 4. **A phone *raises* the amplitude** here — ~+3 at detection distance, to ~204
    lying on the reader (rest 139). The comparison is symmetric. Delta **3**:
    2 fired on noise, and at-rest readings sit within 1–2 steps.
