@@ -1124,6 +1124,7 @@ extern "C" void app_main() {
       if (!g_baseKnown) sleepWithoutBase();
     }
     if (g_rtc.baseLost) ESP_LOGI(TAG, "base found after %u failed searches", g_rtc.searchFails);
+    g_rtc.lastHeartbeatUs = 0;  // heartbeat (with the battery) right away
     g_rtc.baseLost = 0;
     g_rtc.searchFails = 0;
   }
@@ -1183,7 +1184,18 @@ extern "C" void app_main() {
         const uint8_t lastChannel = g_channel;
         g_baseKnown = false;
         findBase(sleepAllowedNow() ? 2 : 0);
-        if (!g_baseKnown && g_basePinned) {
+        if (g_baseKnown) {
+          // Found again, usually on a new channel after the base restarted. The
+          // heartbeat never arrived, and the Ping that found the base carries no
+          // battery, so the base would show "not fitted" for another hour: send
+          // the heartbeat again now (and stay up for its ack).
+          std::vector<uint8_t> hb;
+          appendBattery(hb, false);
+          send(g_base, relay::Op::HealthRsp, 0, g_readerReady ? 2 : 0, hb.data(), hb.size());
+          g_hbAcked = false;
+          g_hbTries = 1;
+          g_hbAckDeadlineUs = esp_timer_get_time() + HEARTBEAT_ACK_WAIT_US;
+        } else if (g_basePinned) {
           g_baseKnown = true;
           g_channel = lastChannel;
           esp_wifi_set_channel(g_channel, WIFI_SECOND_CHAN_NONE);
