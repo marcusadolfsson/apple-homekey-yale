@@ -168,7 +168,9 @@ advertise again; that is handled with a longer direct-connect timeout
 - **Cloud state:** Home Assistant forwards the Yale cloud's state (the cloud sees
   keypad/thumb-turn/door changes within 1–2 s) to `<clientId>/yale/cloud`:
   `locked` / `unlocked` / `jammed` / `door_open` / `door_closed`. Applied at once,
-  then confirmed by a read; a report repeating what we know (our own unlock echoed
+  then confirmed by a read (also when it lands mid-read or mid-command: `waitFor`
+  handles it; dropping it lost a manual "locked" in the first test); a report
+  repeating what we know (our own unlock echoed
   back) costs no read. The base's read is the authority.
 - **Reads never cost a tap:** a read waits while card traffic is under way
   (`RELAY_QUIET_US`) and, if a tap arrives during one, `RemoteNfcReader` sets
@@ -187,6 +189,12 @@ advertise again; that is handled with a longer direct-connect timeout
   voltage sensor and that read sensor.
 - **Commands:** HomeKit / MQTT "lock" now locks (`0x0B`); a failed command puts
   the tile back to the last known state and reads again 15 s later.
+- **Measured 2026-10-08** with HA's forwarder live (`automation.homekey_forward_yale_cloud…`):
+  manual lock/unlock and door open/close reached the base in the same second
+  the cloud reported them (cloud itself 1–2 s behind the lock); the confirming
+  read agreed every time; a deliberately wrong cloud "unlocked" was corrected by
+  the read 15 s later. Reads take 1.7–5.5 s, mostly the connect (0.6–4.5 s at
+  the base's current spot).
 
 **Why polling and not push (measured 2026-10-08):** this lock's advertisement is
 `020106 030224FE 04FFD10101` + a scan response with the 18-byte Yale ID and name

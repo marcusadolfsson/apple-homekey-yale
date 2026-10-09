@@ -576,6 +576,11 @@ bool YaleBleLock::waitFor(EvType type, uint32_t timeoutMs, Ev &out) {
       case EvType::NotifyDropped:
         ESP_LOGW(TAG, "dropped %d-byte notification", ev.status);
         break;
+      case EvType::Cloud:
+        // A cloud report that lands during a read, tap or command still counts
+        // (dropping it here lost a manual "locked" in the 10-08 test).
+        handleCloud(ev.frame[0], ev.frame[1]);
+        break;
       case EvType::Disconnected:
         m_sessionReady = false;
         if (type != EvType::Disconnected) {
