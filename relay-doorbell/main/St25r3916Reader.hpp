@@ -225,6 +225,8 @@ private:
     // doorbell on a metal plate moved the reading 162 -> 154 and it woke 16
     // times until the adaptive threshold reached 9.
     static constexpr uint8_t WU_AUTO_AVG_WEIGHT = 2;  // 16 samples (~1.6 s at 100 ms)
+    // Wait this long in wake-up mode (insensitive) before taking the reference.
+    static constexpr uint32_t WU_SETTLE_MS = 1000;
     uint8_t m_savedEnFd = 0;  // external field detector setting to restore
     uint8_t m_savedTxDriver = 0;  // TX_DRIVER to restore after wake-up mode
 

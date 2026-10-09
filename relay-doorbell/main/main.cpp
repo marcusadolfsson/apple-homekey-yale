@@ -261,6 +261,12 @@ bool g_lpcdSwept = false;  // the sweep has run (this boot, or before the sleep)
 // that the reading then crept 3 steps above. The bench Click ran at ~140
 // (d_res 3) with no false wake-ups in 12 minutes.
 constexpr uint8_t LPCD_TARGET_MAX = 160;
+// Never full drive (d_res 0/1) for wake-up mode, however low the reading: right
+// after a poll the antenna drifts ~8 steps within 0.5 s at full drive, so every
+// re-arm tripped again (2026-10-08 at 187; again 10-09 next to a laptop, where
+// metal pulled the full-drive reading down to 126 and the sweep picked d_res 0).
+// d_res 2 was stable everywhere it was tried: desk, charger, metal plate.
+constexpr uint8_t LPCD_DRES_MIN = 2;
 // The tag announcement is the one frame a tap cannot afford to lose: the base
 // drives everything else, so a dropped announcement means the card sits there
 // doing nothing until the 5 s timeout. Keep it and repeat it until the base
@@ -616,7 +622,7 @@ void lpcdArm() {
       char t[12];
       snprintf(t, sizeof(t), " %u:%u", d, a);
       line += t;
-      if (chosen < 0 && a <= LPCD_TARGET_MAX) chosen = d;
+      if (chosen < 0 && d >= LPCD_DRES_MIN && a <= LPCD_TARGET_MAX) chosen = d;
     }
     ESP_LOGI(TAG, "wake-up drive sweep (d_res:amplitude):%s", line.c_str());
     if (chosen < 0) {

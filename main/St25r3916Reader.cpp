@@ -1095,7 +1095,12 @@ bool St25r3916Reader::startWakeUpMode(uint16_t periodMs, uint8_t amplitudeDelta,
     }
     m_wakeUpMode = true;
 
-    // Calibrate in place from the mode's own readings.
+    // Calibrate in place from the mode's own readings - after letting the
+    // antenna settle. Right after a poll at drive the reading is low and climbs
+    // for ~0.6 s; a reference taken in that window tripped the next sample
+    // (2026-10-09, next to a laptop: ref 41, reading 50-52 600 ms later, a false
+    // wake every 2 s). The settle samples run with the insensitive delta.
+    vTaskDelay(pdMS_TO_TICKS(WU_SETTLE_MS));
     constexpr int SAMPLES = 3;
     unsigned aSum = 0, pSum = 0;
     uint8_t aLo = 255, aHi = 0;
