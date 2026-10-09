@@ -215,7 +215,11 @@ What it takes on the NFC 4 Click:
    slow drift. Without it each false wake re-took the reference right after 1.5 s of
    full-drive polling while the antenna was still "warm", the reading crept 3 steps
    above it, and the next false wake followed — 359 false wakes in 49 min (awake 33 %)
-   on a wall charger, 2026-10-08.
+   on a wall charger, 2026-10-08. **Samples that trip the threshold are averaged in
+   too** (`am_aam`, RFAL `aaInclMeas`): without it a lasting shift bigger than the
+   threshold is never absorbed — mounting the doorbell on a metal plate moved the
+   reading 162 → 154 and it woke 16 times in a minute until the adaptive threshold
+   reached 9 (2026-10-09). Taps on that metal plate still read at threshold 9 (2/2).
 6. **Adaptive threshold (under test, 2026-10-09).** On battery power auto-averaging
    was not enough (see §9). `FALSE_WAKES_TO_RAISE` = 3 false wakes within
    `FALSE_WAKE_WINDOW_US` = 60 s raise the delta by one, up to `LPCD_DELTA_MAX` = 10;
