@@ -1100,11 +1100,9 @@ bool St25r3916Reader::startWakeUpMode(uint16_t periodMs, uint8_t amplitudeDelta,
     // for ~0.6 s; a reference taken in that window tripped the next sample
     // (2026-10-09, next to a laptop: ref 41, reading 50-52 600 ms later, a false
     // wake every 2 s). The settle samples run with the insensitive delta.
-    vTaskDelay(pdMS_TO_TICKS(WU_SETTLE_MS));
-    // A swing beyond the calibration delta during the settle raises a wake-up
-    // event; clear it, and ignore zero readings (the 10-09 sweep read 0 at
-    // d_res 0-2 once the settle was added).
-    { uint8_t latched = 0; readReg(REG_ERROR_WAKEUP_IRQ, latched); }
+    if (m_wuSettleMs) vTaskDelay(pdMS_TO_TICKS(m_wuSettleMs));
+    // Ignore zero readings (seen 10-09 when the chip had lost its register
+    // state during the settle - under investigation).
     constexpr int SAMPLES = 3;
     unsigned aSum = 0, pSum = 0;
     int n = 0;
@@ -1126,7 +1124,15 @@ bool St25r3916Reader::startWakeUpMode(uint16_t periodMs, uint8_t amplitudeDelta,
         m_wuRef.phase = static_cast<uint8_t>((pSum + n / 2) / n);
         m_wuSpread = static_cast<uint8_t>(aHi - aLo);
     } else {
-        ESP_LOGW(TAG, "wake-up: no readings while calibrating; using the measure command's %u", ref.amplitude);
+        uint8_t opc = 0, wupc = 0, amc = 0, irqm = 0, id = 0;
+        const bool okOp = readReg(REG_OP_CONTROL, opc);
+        const bool okWup = readReg(REG_WUP_TIMER_CONTROL, wupc);
+        readReg(REG_AMPLITUDE_MEASURE_CONF, amc);
+        readReg(REG_MASK_ERROR_WAKEUP_IRQ, irqm);
+        const bool okId = readReg(REG_IC_IDENTITY, id);
+        ESP_LOGW(TAG, "wake-up: no readings while calibrating (op 0x%02X%s wup 0x%02X%s am_conf 0x%02X mask 0x%02X, "
+                      "IC identity 0x%02X%s); using the measure command's %u", opc, okOp ? "" : " READ FAILED",
+                 wupc, okWup ? "" : " READ FAILED", amc, irqm, id, okId ? "" : " READ FAILED", ref.amplitude);
         m_wuRef = ref;
         m_wuSpread = 0;
     }
@@ -1176,6 +1182,13 @@ bool St25r3916Reader::measureAmplitudeAt(uint8_t driverResistance, uint8_t &ampl
     if (!n) return false;
     amplitude = static_cast<uint8_t>((sum + n / 2) / n);
     return true;
+}
+
+bool St25r3916Reader::wakeUpConfigIntact() {
+    uint8_t mode = 0;
+    // stopWakeUpMode() just restored REG_MODE-related state; REG_MODE is set to
+    // ISO14443A initiator by configureAfterReset() and arming, 0 after a reset.
+    return m_dev && readReg(REG_MODE, mode) && mode != 0;
 }
 
 uint8_t St25r3916Reader::wakeUpAverage() {

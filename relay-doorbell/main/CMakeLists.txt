@@ -13,3 +13,8 @@ endif()
 if(DOORBELL_HEARTBEAT_SLEEP_S)
   target_compile_definitions(${COMPONENT_LIB} PRIVATE DOORBELL_HEARTBEAT_SLEEP_S=${DOORBELL_HEARTBEAT_SLEEP_S})
 endif()
+# Continuous polling instead of low-power card detection (antenna checks):
+#   idf.py -B build-poll -DDOORBELL_LPCD_OFF=1 build
+if(DOORBELL_LPCD_OFF)
+  target_compile_definitions(${COMPONENT_LIB} PRIVATE DOORBELL_LPCD=0)
+endif()

@@ -280,7 +280,10 @@ constexpr uint8_t LPCD_TARGET_MAX = 160;
 // re-arm tripped again (2026-10-08 at 187; again 10-09 next to a laptop, where
 // metal pulled the full-drive reading down to 126 and the sweep picked d_res 0).
 // d_res 2 was stable everywhere it was tried: desk, charger, metal plate.
-constexpr uint8_t LPCD_DRES_MIN = 2;
+#ifndef DOORBELL_LPCD_DRES_MIN
+#define DOORBELL_LPCD_DRES_MIN 2
+#endif
+constexpr uint8_t LPCD_DRES_MIN = DOORBELL_LPCD_DRES_MIN;
 // The tag announcement is the one frame a tap cannot afford to lose: the base
 // drives everything else, so a dropped announcement means the card sits there
 // doing nothing until the 5 s timeout. Keep it and repeat it until the base
@@ -626,7 +629,32 @@ uint8_t lpcdDeltaFor(uint8_t reference, uint8_t level) {
   return uint8_t(d);
 }
 
+#ifdef DOORBELL_WU_SELFTEST
+// One-off diagnostic: arm wake-up mode at several drives, with and without the
+// settle, and report whether the chip keeps measuring.
+void wuSelfTest() {
+  for (uint32_t settle : {0u, 1000u}) {
+    g_st->setWakeUpSettleMs(settle);
+    for (uint8_t d : {2, 4, 6}) {
+      if (!g_st->startWakeUpMode(LPCD_PERIOD_MS, 6, 0, d)) { ESP_LOGW(TAG, "selftest d_res %u: arm failed", d); continue; }
+      const auto r = g_st->wakeUpReference();
+      vTaskDelay(pdMS_TO_TICKS(500));
+      St25r3916Reader::AntennaReading m;
+      g_st->takeWakeUpEvents(&m);
+      ESP_LOGI(TAG, "selftest settle %lu ms, d_res %u: reference %u, spread %u, reading 0.5 s later %u",
+               (unsigned long)settle, d, r.amplitude, g_st->wakeUpSpread(), m.amplitude);
+      g_st->stopWakeUpMode();
+    }
+  }
+  g_st->setWakeUpSettleMs(1000);
+}
+#endif
+
 void lpcdArm() {
+#ifdef DOORBELL_WU_SELFTEST
+  static bool selfTested = false;
+  if (!selfTested) { selfTested = true; wuSelfTest(); }
+#endif
   // Drive sweep (first arm, or when the surroundings changed): pick the strongest
   // driver resistance whose reading is <= LPCD_TARGET_MAX, never stronger than
   // LPCD_DRES_MIN. At full drive the Click reads 255 (a phone cannot move it),
@@ -780,6 +808,14 @@ bool lpcdGate() {
     ESP_LOGW(TAG, "wake-up found by register check, but the IRQ line on D1 stayed low - check that wire");
   }
   g_st->stopWakeUpMode();
+#ifdef DOORBELL_WU_SELFTEST
+  {
+    uint8_t id = 0, mode = 0;
+    // REG_MODE is set to ISO14443A when arming; 0 means the chip reset.
+    ESP_LOGI(TAG, "after wake-up: chip config %s", g_st->wakeUpConfigIntact() ? "intact" : "LOST (chip reset?)");
+    (void)id; (void)mode;
+  }
+#endif
   ++g_lpcdWakes;
   g_lpcdWakePending = true;
   g_lpcdWakeUs = now;

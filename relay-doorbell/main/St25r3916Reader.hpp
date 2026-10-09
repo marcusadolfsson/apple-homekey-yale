@@ -230,6 +230,12 @@ private:
     static constexpr uint8_t WU_AUTO_AVG_WEIGHT = 2;  // 16 samples (~1.6 s at 100 ms)
     // Wait this long in wake-up mode (insensitive) before taking the reference.
     static constexpr uint32_t WU_SETTLE_MS = 1000;
+    uint32_t m_wuSettleMs = WU_SETTLE_MS;
+public:
+    void setWakeUpSettleMs(uint32_t ms) { m_wuSettleMs = ms; }
+    // Diagnostic: is the TX driver setting we program still there (0 after a reset)?
+    bool wakeUpConfigIntact();
+private:
     uint8_t m_savedEnFd = 0;  // external field detector setting to restore
     uint8_t m_savedTxDriver = 0;  // TX_DRIVER to restore after wake-up mode
 
