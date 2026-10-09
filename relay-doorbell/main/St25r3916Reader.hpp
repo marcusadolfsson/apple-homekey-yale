@@ -122,6 +122,9 @@ public:
     uint8_t wakeUpSpread() const { return m_wuSpread; }
     // The chip's running amplitude average (auto-averaging; see m_wuAutoAvg).
     uint8_t wakeUpAverage();
+    // Amplitude by the measure command at a given TX driver resistance (outside
+    // wake-up mode; the driver setting is restored). Averaged over `samples`.
+    bool measureAmplitudeAt(uint8_t driverResistance, uint8_t &amplitude, int samples = 4);
 
     // State that must survive the host's deep sleep for the reader to resume
     // in wake-up mode without a reset: init() issues SET_DEFAULT, which would

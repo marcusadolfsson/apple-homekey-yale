@@ -138,14 +138,17 @@ struct RtcState {
   uint32_t awakeMs;     // time spent awake, summed over every wake
   uint32_t falseWakes;  // reader woke us but no card came
   uint32_t searchMs;    // time spent searching channels for the base
-  uint8_t lpcdDelta;    // current (adaptive) wake-up threshold
+  uint8_t lpcdDelta;    // wake-up threshold in use (reported in stats)
+  uint8_t lpcdLevel;    // adaptive sensitivity level, 0..LPCD_LEVEL_MAX
+  uint8_t sweepRef;     // armed reference right after the last drive sweep
+  int64_t lastSweepUs;
   uint8_t falseInWindow;
   int64_t falseWindowUs, lastFalseUs, lastDeltaChangeUs;
   uint8_t falseLog[4][2];  // last false wake-ups: reading, running average
   uint8_t falseLogN;       // total recorded (index = n % 4)
 };
 RTC_DATA_ATTR RtcState g_rtc;
-constexpr uint32_t RTC_MAGIC = 0xD00B5705;
+constexpr uint32_t RTC_MAGIC = 0xD00B5706;
 
 // Keeps counting through deep sleep, unlike esp_timer_get_time().
 int64_t rtcNowUs() {
@@ -219,13 +222,24 @@ int g_fieldClearPolls = 0;
 constexpr uint16_t LPCD_PERIOD_MS = 100;
 // In A/D steps. Wake-up-mode readings on the Click sit within ~2 steps of
 // each other at rest, so 2 (RFAL's default) fired on noise; 3 is the floor.
-constexpr uint8_t LPCD_AMPLITUDE_DELTA = 3;  // the floor; see the adaptive threshold
-// Adaptive threshold: on battery the readings can jitter more than on USB
-// power (10-09: 7172 false wake-ups in 6 h on battery, 1 overnight on a
-// charger). FALSE_WAKES_TO_RAISE false wake-ups within FALSE_WAKE_WINDOW_US
-// raise it by one step (up to LPCD_DELTA_MAX); an hour without one lowers it
-// by one. A phone moves the reading by ~18-26 steps, so taps survive.
-constexpr uint8_t LPCD_DELTA_MAX = 10;
+constexpr uint8_t LPCD_AMPLITUDE_DELTA = 3;  // threshold until the first arm computes one
+// Adaptive sensitivity: FALSE_WAKES_TO_RAISE false wake-ups within
+// FALSE_WAKE_WINDOW_US raise the level by one (up to LPCD_LEVEL_MAX); an hour
+// without one lowers it by one. (10-09: 7172 false wake-ups in 6 h with a fixed
+// threshold of 3 after the reading shifted.) A phone moves the reading ~15 %.
+// The threshold is a share of the antenna reading, not fixed steps: metal or a
+// nearby laptop can pull the reading from ~150 down to ~50, where 10 steps is a
+// fifth of the signal and a phone (~15 % of it) may no longer register. Level L
+// gives LPCD_PCT_BASE + L percent of the reference, at least LPCD_DELTA_FLOOR
+// steps: 3 at 150 to start, up to 10 at 150 / 4 at 54 at the top level.
+constexpr uint8_t LPCD_PCT_BASE = 2;
+constexpr uint8_t LPCD_LEVEL_MAX = 5;
+constexpr uint8_t LPCD_DELTA_FLOOR = 2;
+// Re-run the drive sweep when the armed reference strays this far from the one
+// right after the last sweep (surroundings changed: mounted, metal, laptop), at
+// most every RESWEEP_MIN_INTERVAL_US.
+constexpr unsigned RESWEEP_SHIFT_PCT = 30;
+constexpr int64_t RESWEEP_MIN_INTERVAL_US = 10LL * 60 * 1000000;
 constexpr int FALSE_WAKES_TO_RAISE = 3;
 constexpr int64_t FALSE_WAKE_WINDOW_US = 60000000;
 constexpr int64_t QUIET_TO_LOWER_US = 3600000000LL;
@@ -605,20 +619,29 @@ bool readerInit() {
   return g_readerReady;
 }
 
+uint8_t lpcdDeltaFor(uint8_t reference, uint8_t level) {
+  unsigned d = (unsigned(reference) * (LPCD_PCT_BASE + level) + 50) / 100;
+  if (d < LPCD_DELTA_FLOOR) d = LPCD_DELTA_FLOOR;
+  if (d > 15) d = 15;
+  return uint8_t(d);
+}
+
 void lpcdArm() {
-  // First arm: sweep the driver resistance. On the NFC 4 Click the amplitude
-  // reading sits at the 255 ceiling at full drive, where a phone cannot pull it
-  // down far enough to register (two minutes of taps produced no wake-up).
-  // Each step arms insensitive (delta 15), so its reference is the mode's own
-  // reading at that drive.
+  // Drive sweep (first arm, or when the surroundings changed): pick the strongest
+  // driver resistance whose reading is <= LPCD_TARGET_MAX, never stronger than
+  // LPCD_DRES_MIN. At full drive the Click reads 255 (a phone cannot move it),
+  // and right after a poll it drifts. Measured with the measure command (~1 ms
+  // per step): arming wake-up mode per step took ~1.4 s each with the settle and
+  // read 0 at d_res 0-2 on 10-09.
+  bool justSwept = false;
   if (!g_lpcdSwept) {
     g_lpcdSwept = true;
+    justSwept = true;
     std::string line;
     int chosen = -1;
     for (uint8_t d = 0; d <= 15; ++d) {
-      if (!g_st->startWakeUpMode(LPCD_PERIOD_MS, 15, 0, d)) break;
-      const uint8_t a = g_st->wakeUpReference().amplitude;
-      g_st->stopWakeUpMode();
+      uint8_t a = 0;
+      if (!g_st->measureAmplitudeAt(d, a)) break;
       char t[12];
       snprintf(t, sizeof(t), " %u:%u", d, a);
       line += t;
@@ -633,9 +656,14 @@ void lpcdArm() {
       g_lpcdDres = uint8_t(chosen);
       ESP_LOGI(TAG, "wake-up drive: d_res %u", g_lpcdDres);
     }
+    g_rtc.lastSweepUs = rtcNowUs();
   }
   const int64_t now = esp_timer_get_time();
-  if (g_rtc.lpcdDelta < LPCD_AMPLITUDE_DELTA || g_rtc.lpcdDelta > LPCD_DELTA_MAX) g_rtc.lpcdDelta = LPCD_AMPLITUDE_DELTA;
+  if (g_rtc.lpcdLevel > LPCD_LEVEL_MAX) g_rtc.lpcdLevel = 0;
+  uint8_t basis = g_st->wakeUpReference().amplitude;
+  if (!basis) basis = g_rtc.sweepRef;
+  if (!basis) basis = 150;
+  g_rtc.lpcdDelta = lpcdDeltaFor(basis, g_rtc.lpcdLevel);
   if (!g_st->startWakeUpMode(LPCD_PERIOD_MS, g_rtc.lpcdDelta, LPCD_PHASE_DELTA, g_lpcdDres)) {
     ESP_LOGE(TAG, "could not enter wake-up mode; polling instead, retry in 5 s");
     g_lpcdActiveUntilUs = now + 5000000;
@@ -647,15 +675,29 @@ void lpcdArm() {
   g_lpcdCardSeen = false;
   g_rtc.lastArmUs = rtcNowUs();
   const auto &ref = g_st->wakeUpReference();
+  if (justSwept) {
+    g_rtc.sweepRef = ref.amplitude;
+  } else if (g_rtc.sweepRef) {
+    const unsigned r = ref.amplitude, s0 = g_rtc.sweepRef;
+    const bool moved = r * 100 > s0 * (100 + RESWEEP_SHIFT_PCT) || r * 100 < s0 * (100 - RESWEEP_SHIFT_PCT) ||
+                       r > LPCD_TARGET_MAX + 20;
+    if (moved && rtcNowUs() - g_rtc.lastSweepUs > RESWEEP_MIN_INTERVAL_US) {
+      ESP_LOGW(TAG, "antenna baseline moved %u -> %u since the last drive sweep; sweeping again", s0, r);
+      g_st->stopWakeUpMode();
+      g_lpcdSwept = false;
+      lpcdArm();
+      return;
+    }
+  }
   static bool firstArm = true;
-  if (firstArm) {
+  if (firstArm || justSwept) {
     firstArm = false;
     ESP_LOGI(TAG, "wake-up armed: reference amplitude %u (measure command said %u, spread %u), "
-                  "running average %u, IRQ line %d", ref.amplitude, g_st->wakeUpDirectAmplitude(),
-             g_st->wakeUpSpread(), g_st->wakeUpAverage(), gpio_get_level(PIN_NFC_IRQ));
+                  "threshold %u (level %u), IRQ line %d", ref.amplitude, g_st->wakeUpDirectAmplitude(),
+             g_st->wakeUpSpread(), g_rtc.lpcdDelta, g_rtc.lpcdLevel, gpio_get_level(PIN_NFC_IRQ));
   } else {
-    ESP_LOGD(TAG, "wake-up armed: reference amplitude %u, spread %u", ref.amplitude,
-             g_st->wakeUpSpread());
+    ESP_LOGD(TAG, "wake-up armed: reference amplitude %u, spread %u, threshold %u", ref.amplitude,
+             g_st->wakeUpSpread(), g_rtc.lpcdDelta);
   }
 }
 
@@ -697,12 +739,13 @@ bool lpcdGate() {
         g_rtc.falseWindowUs = t;
         g_rtc.falseInWindow = 0;
       }
-      if (++g_rtc.falseInWindow >= FALSE_WAKES_TO_RAISE && g_rtc.lpcdDelta < LPCD_DELTA_MAX) {
-        ++g_rtc.lpcdDelta;
+      if (++g_rtc.falseInWindow >= FALSE_WAKES_TO_RAISE && g_rtc.lpcdLevel < LPCD_LEVEL_MAX) {
+        ++g_rtc.lpcdLevel;
         g_rtc.falseInWindow = 0;
         g_rtc.falseWindowUs = t;
         g_rtc.lastDeltaChangeUs = t;
-        ESP_LOGW(TAG, "false wake-ups keep coming; wake-up threshold raised to %u", g_rtc.lpcdDelta);
+        ESP_LOGW(TAG, "false wake-ups keep coming; wake-up sensitivity level raised to %u (%u %% of the reading)",
+                 g_rtc.lpcdLevel, LPCD_PCT_BASE + g_rtc.lpcdLevel);
       }
       g_lpcdWakePending = false;
       ESP_LOGI(TAG, "wake-up was a false alarm: no card within %lld ms", LPCD_ACTIVE_US / 1000);
@@ -864,11 +907,11 @@ void maybeDeepSleep() {
   if (now - g_lastTxUs < TX_DRAIN_US) return;
   {
     const int64_t t = rtcNowUs();
-    if (g_rtc.lpcdDelta > LPCD_AMPLITUDE_DELTA && t - g_rtc.lastFalseUs > QUIET_TO_LOWER_US &&
+    if (g_rtc.lpcdLevel > 0 && t - g_rtc.lastFalseUs > QUIET_TO_LOWER_US &&
         t - g_rtc.lastDeltaChangeUs > QUIET_TO_LOWER_US) {
-      --g_rtc.lpcdDelta;
+      --g_rtc.lpcdLevel;
       g_rtc.lastDeltaChangeUs = t;
-      ESP_LOGI(TAG, "an hour without false wake-ups; wake-up threshold lowered to %u", g_rtc.lpcdDelta);
+      ESP_LOGI(TAG, "an hour without false wake-ups; wake-up sensitivity level lowered to %u", g_rtc.lpcdLevel);
       g_st->stopWakeUpMode();
       lpcdArm();
       return;  // sleep on a later pass, once re-armed with the new threshold
@@ -1182,6 +1225,7 @@ extern "C" void app_main() {
     std::memset(&g_rtc, 0, sizeof(g_rtc));
     g_rtc.powerOnUs = rtcNowUs();
     g_rtc.lpcdDelta = LPCD_AMPLITUDE_DELTA;
+    g_rtc.lpcdLevel = 0;
     g_stayAwakeUntilUs = COLD_BOOT_AWAKE_US;
   }
 

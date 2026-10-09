@@ -1101,22 +1101,35 @@ bool St25r3916Reader::startWakeUpMode(uint16_t periodMs, uint8_t amplitudeDelta,
     // (2026-10-09, next to a laptop: ref 41, reading 50-52 600 ms later, a false
     // wake every 2 s). The settle samples run with the insensitive delta.
     vTaskDelay(pdMS_TO_TICKS(WU_SETTLE_MS));
+    // A swing beyond the calibration delta during the settle raises a wake-up
+    // event; clear it, and ignore zero readings (the 10-09 sweep read 0 at
+    // d_res 0-2 once the settle was added).
+    { uint8_t latched = 0; readReg(REG_ERROR_WAKEUP_IRQ, latched); }
     constexpr int SAMPLES = 3;
     unsigned aSum = 0, pSum = 0;
+    int n = 0;
     uint8_t aLo = 255, aHi = 0;
     for (int i = 0; i < SAMPLES; ++i) {
         vTaskDelay(pdMS_TO_TICKS(periodMs + periodMs / 4 + 1));
         uint8_t a = 0, ph = 0;
         readReg(REG_AMPLITUDE_MEASURE_RESULT, a);
         readReg(REG_PHASE_MEASURE_RESULT, ph);
+        if (a == 0) continue;
         aSum += a;
         pSum += ph;
+        ++n;
         if (a < aLo) aLo = a;
         if (a > aHi) aHi = a;
     }
-    m_wuRef.amplitude = static_cast<uint8_t>((aSum + SAMPLES / 2) / SAMPLES);
-    m_wuRef.phase = static_cast<uint8_t>((pSum + SAMPLES / 2) / SAMPLES);
-    m_wuSpread = static_cast<uint8_t>(aHi - aLo);
+    if (n) {
+        m_wuRef.amplitude = static_cast<uint8_t>((aSum + n / 2) / n);
+        m_wuRef.phase = static_cast<uint8_t>((pSum + n / 2) / n);
+        m_wuSpread = static_cast<uint8_t>(aHi - aLo);
+    } else {
+        ESP_LOGW(TAG, "wake-up: no readings while calibrating; using the measure command's %u", ref.amplitude);
+        m_wuRef = ref;
+        m_wuSpread = 0;
+    }
     // Reference first, then the real delta, so there is no window in which
     // the old reference meets the tight delta.
     if (amplitudeDelta) {
@@ -1146,6 +1159,23 @@ uint8_t St25r3916Reader::takeWakeUpEvents(AntennaReading* lastMeasured) {
     uint8_t avg = 0;
     if ((irq & WAKE_AMPLITUDE) && readReg(REG_AMPLITUDE_MEASURE_AA_RESULT, avg)) m_wuRef.amplitude = avg;
     return irq & (WAKE_AMPLITUDE | WAKE_PHASE);
+}
+
+bool St25r3916Reader::measureAmplitudeAt(uint8_t driverResistance, uint8_t &amplitude, int samples) {
+    if (!m_dev || m_wakeUpMode || samples < 1) return false;
+    uint8_t saved = 0;
+    if (!readReg(REG_TX_DRIVER, saved)) return false;
+    modifyReg(REG_TX_DRIVER, TX_DRIVER_D_RES_MASK, driverResistance & TX_DRIVER_D_RES_MASK);
+    unsigned sum = 0;
+    int n = 0;
+    for (int i = 0; i < samples; ++i) {
+        AntennaReading r;
+        if (measureAntenna(r)) { sum += r.amplitude; ++n; }
+    }
+    writeReg(REG_TX_DRIVER, saved);
+    if (!n) return false;
+    amplitude = static_cast<uint8_t>((sum + n / 2) / n);
+    return true;
 }
 
 uint8_t St25r3916Reader::wakeUpAverage() {

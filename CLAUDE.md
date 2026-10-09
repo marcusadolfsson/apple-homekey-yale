@@ -220,12 +220,24 @@ What it takes on the NFC 4 Click:
    threshold is never absorbed — mounting the doorbell on a metal plate moved the
    reading 162 → 154 and it woke 16 times in a minute until the adaptive threshold
    reached 9 (2026-10-09). Taps on that metal plate still read at threshold 9 (2/2).
-6. **Adaptive threshold (under test, 2026-10-09).** On battery power auto-averaging
-   was not enough (see §9). `FALSE_WAKES_TO_RAISE` = 3 false wakes within
-   `FALSE_WAKE_WINDOW_US` = 60 s raise the delta by one, up to `LPCD_DELTA_MAX` = 10;
-   an hour without one (`QUIET_TO_LOWER_US`) lowers it by one, floor 3. The current
-   value lives in `RtcState::lpcdDelta`; a false wake is a wake-up with no card within
-   `LPCD_ACTIVE_US`.
+6. **Adaptive sensitivity (under test, 2026-10-09).** The threshold is a share of
+   the armed reference, not fixed steps: level L → (`LPCD_PCT_BASE` 2 + L) % of it, at
+   least `LPCD_DELTA_FLOOR` 2 steps (3 at a reference of 150 to start; at the top
+   level 5, 10 at 150 or 4 at 54). Metal or a laptop can pull the reading from ~150
+   to ~50, where a fixed 10 steps would hide a phone (~15 % of the reading).
+   `FALSE_WAKES_TO_RAISE` = 3 false wakes within 60 s raise the level; an hour without
+   one lowers it. State in `RtcState::lpcdLevel` / `lpcdDelta` (reported in stats).
+7. **Drive sweep** with the measure command (~1 ms per d_res; arming wake-up mode per
+   step took ~1.4 s each with the settle, and read 0 at d_res 0–2), never stronger
+   than `LPCD_DRES_MIN` = 2 (full drive drifts ~8 steps right after a poll). Run at
+   power-up and again when the armed reference strays more than `RESWEEP_SHIFT_PCT`
+   30 % from the one right after the last sweep (surroundings changed), at most every
+   10 min (`RESWEEP_MIN_INTERVAL_US`).
+8. **Settle before the reference:** the driver waits `WU_SETTLE_MS` = 1 s in wake-up
+   mode (insensitive) before calibrating — right after a poll the reading climbs for
+   ~0.6 s (next to a laptop: ref 41 → 50–52, a false wake every 2 s; with the settle,
+   1 in 100 s). Wake-up events raised during the settle are cleared; zero readings are
+   ignored.
 
 ### Deep sleep
 
