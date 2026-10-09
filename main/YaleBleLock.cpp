@@ -81,6 +81,11 @@ constexpr int64_t READ_RETRY_US = 2000000;
 // After a command fails (lock out of reach), read again soon so the tile does
 // not stay on "unlocking".
 constexpr int64_t AFTER_FAILURE_READ_US = 15000000;
+// A command is "in flight" from the request until the lock's result; bounded in
+// case the result never comes. Cloud lock reports are ignored meanwhile, and
+// for CLOUD_STALE_US after our own result if they contradict it.
+constexpr int64_t CMD_PENDING_MAX_US = 20000000;
+constexpr int64_t CLOUD_STALE_US = 6000000;
 
 constexpr uint8_t YALE_UNLOCKING = 0x02, YALE_UNLOCKED = 0x03, YALE_LOCKING = 0x04, YALE_LOCKED = 0x05,
                   YALE_JAMMED = 0x07, YALE_SECURE = 0x0C;
@@ -805,6 +810,23 @@ bool YaleBleLock::readStatus(bool withBattery) {
 // cloud) costs no read.
 void YaleBleLock::handleCloud(uint8_t lock, uint8_t door) {
   bool changed = false;
+  const int64_t now = esp_timer_get_time();
+  if (lock != 0xFF && now < m_cmdPendingUntilUs) {
+    // Only the lock's own result decides an in-flight command: a cloud report
+    // now is the previous state arriving late (10-08: a stale "unlocked" landed
+    // mid-"locking" and showed for 1.4 s; the other way round it could fake
+    // a successful unlock to HA's presence automation).
+    ESP_LOGI(TAG, "cloud: lock %s ignored (our command is in flight)", lockStatusName(lock));
+    lock = 0xFF;
+  } else if (lock != 0xFF && lock != m_lockStatus && m_ownResultUs && now - m_ownResultUs < CLOUD_STALE_US) {
+    // Contradicts the result the lock gave us seconds ago: most likely stale,
+    // but it could be real (an instant auto-relock) - let a read decide.
+    ESP_LOGI(TAG, "cloud: lock %s ignored (contradicts our result %lld ms ago); reading to check",
+             lockStatusName(lock), (now - m_ownResultUs) / 1000);
+    lock = 0xFF;
+    const int64_t due = now + CONFIRM_DELAY_US;
+    if (!m_statusDueUs || m_statusDueUs < due) m_statusDueUs = due;
+  }
   if (lock != 0xFF && lock != m_lockStatus) {
     ESP_LOGI(TAG, "cloud: lock %s (was %s)", lockStatusName(lock),
              m_lockStatus == 0xFF ? "unknown" : lockStatusName(m_lockStatus));
@@ -872,6 +894,7 @@ void YaleBleLock::performCommand(Cmd cmd) {
     if (cmd == Cmd::Unlock || cmd == Cmd::Lock) {
       // Do not leave the tile on "unlocking": back to what we last knew, and
       // read again soon.
+      m_cmdPendingUntilUs = 0;
       if (m_lockStatus != 0xFF) reportLock(YALE_SRC_COMMAND);
       m_statusDueUs = esp_timer_get_time() + AFTER_FAILURE_READ_US;
     }
@@ -894,6 +917,7 @@ void YaleBleLock::performCommand(Cmd cmd) {
       const bool unlock = cmd == Cmd::Unlock;
       const uint8_t op = unlock ? OP_UNLOCK : OP_LOCK;
       m_lastOwnOpUs = esp_timer_get_time();
+      m_cmdPendingUntilUs = m_lastOwnOpUs + CMD_PENDING_MAX_US;
       // Return on the lock's ack (0xAA, tens of ms), not its result (0xBB,
       // ~1.8 s later when the motor stops). Nothing here depends on the
       // result - state is not tracked - but waiting for it held the shared
@@ -910,6 +934,7 @@ void YaleBleLock::performCommand(Cmd cmd) {
         }
       } else {
         ESP_LOGE(TAG, "%s: lock did not acknowledge the command", cmdName(cmd));
+        m_cmdPendingUntilUs = 0;
         if (m_lockStatus != 0xFF) reportLock(YALE_SRC_COMMAND);
         m_statusDueUs = esp_timer_get_time() + AFTER_FAILURE_READ_US;
       }
@@ -1236,6 +1261,8 @@ void YaleBleLock::handleCommandFrame(const Frame &f) {
   } else if (f[0] == 0xBB && (f[1] == OP_UNLOCK || f[1] == OP_LOCK)) {
     // The result, when the motor stops (~1.8 s after the ack).
     const bool unlock = f[1] == OP_UNLOCK;
+    m_cmdPendingUntilUs = 0;
+    m_ownResultUs = esp_timer_get_time();
     if (f[0x0F] == 0x00) {
       ESP_LOGI(TAG, "lock reports %s done", unlock ? "unlock" : "lock");
       setLockStatus(unlock ? YALE_UNLOCKED : YALE_LOCKED, YALE_SRC_COMMAND);

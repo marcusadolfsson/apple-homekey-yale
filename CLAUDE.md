@@ -170,8 +170,14 @@ advertise again; that is handled with a longer direct-connect timeout
   `locked` / `unlocked` / `jammed` / `door_open` / `door_closed`. Applied at once,
   then confirmed by a read (also when it lands mid-read or mid-command: `waitFor`
   handles it; dropping it lost a manual "locked" in the first test); a report
-  repeating what we know (our own unlock echoed
-  back) costs no read. The base's read is the authority.
+  repeating what we know (our own unlock echoed back) costs no read. **Cloud lock
+  reports are ignored while our own command is in flight** (request → the lock's
+  result, max 20 s) **and, if they contradict it, for 6 s after our result**
+  (then a read decides): the cloud runs ~2 s behind, and on 10-08 its stale
+  "unlocked" from the previous tap landed mid-"locking" and showed for 1.4 s —
+  the other way round it could fake a successful unlock to HA's presence
+  automation, which accepts the first "unlocked". The base's read is the
+  authority.
 - **Reads never cost a tap:** a read waits while card traffic is under way
   (`RELAY_QUIET_US`) and, if a tap arrives during one, `RemoteNfcReader` sets
   `g_bleAbort` and drops that announcement; the read stops within ~50 ms

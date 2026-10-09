@@ -143,6 +143,11 @@ private:
   void reportStatus(uint8_t source); // YALE_STATUS: MQTT door / battery / read
   // Real lock state, lock's own codes; 0xFF = not known yet.
   uint8_t m_lockStatus = 0xFF;
+  // Our own lock/unlock: from the request until the lock's result (or failure),
+  // and the moment that result came in. The cloud runs ~2 s behind the lock, so
+  // its report of the PREVIOUS state can land mid-command or just after it.
+  int64_t m_cmdPendingUntilUs = 0;
+  int64_t m_ownResultUs = 0;
   uint8_t m_doorStatus = 0xFF;
   uint16_t m_batteryMv = 0;
   int64_t m_lastBatteryUs = 0;
