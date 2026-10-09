@@ -123,7 +123,7 @@ private:
     AppEventLoop::SubscriptionHandle m_yale_status;
     // Yale lock topics, under the client id: yale/status (JSON, retained),
     // yale/read (each BLE read; HA's expire_after flags a stale base) and
-    // yale/hint (in: cloud state forwarded by Home Assistant).
+    // yale/cloud (in: the Yale cloud state, forwarded by Home Assistant).
     std::string yaleTopic(const char *leaf) const { return m_mqttConfig.mqttClientId + "/yale/" + leaf; }
 
     // Status tracking (replaces event-based status publishing)

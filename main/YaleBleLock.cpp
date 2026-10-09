@@ -70,7 +70,7 @@ constexpr int64_t OWN_OP_SETTLE_US = 6100000;
 constexpr int64_t ADVERT_COALESCE_US = 100000;
 // Status reads. The lock gives no change signal over BLE (see the class
 // comment), so read at boot, then every POLL_US, and CONFIRM_DELAY_US after a
-// cloud hint changes the state. A read connects for ~1-3 s; battery is read
+// cloud report changes the state. A read connects for ~1-3 s; battery is read
 // only every BATTERY_REFRESH_US (it moves slowly). A read waits while a tap is
 // under way (RELAY_QUIET_US) and gives way at once if one starts.
 constexpr int64_t POLL_US = 5LL * 60 * 1000000;
@@ -275,14 +275,14 @@ void YaleBleLock::begin() {
     if (s.targetState == LockManager::UNLOCKED) request(Cmd::Unlock);
     else if (s.targetState == LockManager::LOCKED) request(Cmd::Lock);
   });
-  m_hintSub = AppEventLoop::subscribe(LOCK_EVENT, YALE_HINT, [this](const uint8_t *data, size_t size) {
+  m_cloudSub = AppEventLoop::subscribe(LOCK_EVENT, YALE_CLOUD, [this](const uint8_t *data, size_t size) {
     if (size == 0 || data == nullptr) return;
     std::error_code ec;
     std::span<const uint8_t> payload(data, size);
     EventYaleStatus h = alpaca::deserialize<EventYaleStatus>(payload, ec);
     if (ec) return;
     Ev ev{};
-    ev.type = EvType::Hint;
+    ev.type = EvType::Cloud;
     ev.frame[0] = h.lock;
     ev.frame[1] = h.door;
     post(ev);
@@ -692,8 +692,8 @@ void YaleBleLock::run() {
       case EvType::Advert:
         onAdvert(ev);
         break;
-      case EvType::Hint:
-        handleHint(ev.frame[0], ev.frame[1]);
+      case EvType::Cloud:
+        handleCloud(ev.frame[0], ev.frame[1]);
         break;
       default:
         break;
@@ -794,20 +794,20 @@ bool YaleBleLock::readStatus(bool withBattery) {
   return false;
 }
 
-// A hint from the Yale cloud (via Home Assistant). Applied at once - the cloud
+// The Yale cloud state (via Home Assistant). Applied at once - the cloud
 // sees manual changes within 1-2 s - and confirmed by a read shortly after. A
-// hint that only repeats what we already know (our own unlock, echoed by the
+// report that only repeats what we already know (our own unlock, echoed by the
 // cloud) costs no read.
-void YaleBleLock::handleHint(uint8_t lock, uint8_t door) {
+void YaleBleLock::handleCloud(uint8_t lock, uint8_t door) {
   bool changed = false;
   if (lock != 0xFF && lock != m_lockStatus) {
-    ESP_LOGI(TAG, "cloud hint: lock %s (was %s)", lockStatusName(lock),
+    ESP_LOGI(TAG, "cloud: lock %s (was %s)", lockStatusName(lock),
              m_lockStatus == 0xFF ? "unknown" : lockStatusName(m_lockStatus));
     setLockStatus(lock, YALE_SRC_CLOUD);
     changed = true;
   }
   if (door != 0xFF && door != m_doorStatus) {
-    ESP_LOGI(TAG, "cloud hint: door %s", doorStatusName(door));
+    ESP_LOGI(TAG, "cloud: door %s", doorStatusName(door));
     setDoorStatus(door);
     changed = true;
   }

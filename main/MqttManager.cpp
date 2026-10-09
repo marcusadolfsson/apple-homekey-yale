@@ -402,8 +402,8 @@ void MqttManager::onConnected() {
     if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to lockTStateCmd");
     ret = esp_mqtt_client_subscribe(m_client, m_mqttConfig.btrLvlCmdTopic.c_str(), 0);
     if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to btrLvlCmdTopic");
-    ret = esp_mqtt_client_subscribe(m_client, yaleTopic("hint").c_str(), 0);
-    if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to the Yale hint topic");
+    ret = esp_mqtt_client_subscribe(m_client, yaleTopic("cloud").c_str(), 0);
+    if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to the Yale cloud topic");
     if (m_mqttConfig.lockEnableCustomState) {
         ret = esp_mqtt_client_subscribe(m_client, m_mqttConfig.lockCustomStateCmd.c_str(), 0);
         if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to lockCustomStateCmd");
@@ -436,8 +436,8 @@ void MqttManager::onData(const std::string& topic, const std::string& data) {
     .source = LockManager::MQTT
     };
     std::array<uint8_t, sizeof(EventLockState)> d{};
-    if (topic == yaleTopic("hint")) {
-      // Yale cloud state forwarded by Home Assistant: a hint, confirmed by a BLE read.
+    if (topic == yaleTopic("cloud")) {
+      // Yale cloud state forwarded by Home Assistant, confirmed by a BLE read.
       EventYaleStatus h{};
       h.source = YALE_SRC_CLOUD;
       if (data == "locked") h.lock = 0x05;
@@ -445,10 +445,10 @@ void MqttManager::onData(const std::string& topic, const std::string& data) {
       else if (data == "jammed") h.lock = 0x07;
       else if (data == "door_open") h.door = 0x03;
       else if (data == "door_closed") h.door = 0x01;
-      else { ESP_LOGW(TAG, "Unknown Yale hint '%s'", data.c_str()); return; }
+      else { ESP_LOGW(TAG, "Unknown Yale cloud state '%s'", data.c_str()); return; }
       std::array<uint8_t, 16> hd{};
       size_t n = alpaca::serialize(h, hd);
-      AppEventLoop::publish(LOCK_EVENT, YALE_HINT, hd.data(), n);
+      AppEventLoop::publish(LOCK_EVENT, YALE_CLOUD, hd.data(), n);
       return;
     }
     if (topic == m_mqttConfig.lockStateCmd) {

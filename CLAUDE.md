@@ -164,11 +164,11 @@ advertise again; that is handled with a longer direct-connect timeout
   `0xBB` = done; a non-zero result = jammed, as yalexs-ble), and **status reads**
   (GETSTATUS lock `0x02`, door `0x2E`, battery `0x0F` every 6 h; byte 8, battery
   bytes 8–9 in mV) at boot +5 s, every **5 min** (`POLL_US`), and 10 s after a
-  cloud hint that changed the state (`CONFIRM_DELAY_US`). A read takes ~1.8–3.4 s.
-- **Cloud hints:** Home Assistant forwards the Yale cloud's state (the cloud sees
-  keypad/thumb-turn/door changes within 1–2 s) to `<clientId>/yale/hint`:
+  cloud report that changed the state (`CONFIRM_DELAY_US`). A read takes ~1.8–3.4 s.
+- **Cloud state:** Home Assistant forwards the Yale cloud's state (the cloud sees
+  keypad/thumb-turn/door changes within 1–2 s) to `<clientId>/yale/cloud`:
   `locked` / `unlocked` / `jammed` / `door_open` / `door_closed`. Applied at once,
-  then confirmed by a read; a hint repeating what we know (our own unlock echoed
+  then confirmed by a read; a report repeating what we know (our own unlock echoed
   back) costs no read. The base's read is the authority.
 - **Reads never cost a tap:** a read waits while card traffic is under way
   (`RELAY_QUIET_US`) and, if a tap arrives during one, `RemoteNfcReader` sets
@@ -501,9 +501,9 @@ which is *not encrypted* — enable flash encryption before deploying.
 ## Known issues / next steps
 
 1. **Lock state is tracked as of 2026-10-08** (see the Yale section): reads +
-   cloud hints. Still to do: point HA's automations at the base's MQTT lock and
+   the Yale cloud state. Still to do: point HA's automations at the base's MQTT lock and
    disable `yalexs_ble`, so the base is the lock's only BLE client; and the HA
-   automation that forwards the Yale cloud state to `<clientId>/yale/hint`.
+   automation that forwards the Yale cloud state to `<clientId>/yale/cloud`.
 2. **The base follows its AP's channel** and the AP roams. A sleeping doorbell
    finds out when a tap or button press goes unanswered and searches then
    (`researchBase`, see the deep-sleep section), so a tap after a channel change

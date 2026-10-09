@@ -20,7 +20,7 @@ extern std::atomic<bool> g_bleRadioBusy;
 // esp_timer time of the last card traffic from the doorbell (tag announcement
 // or APDU response). Advertisement listening keeps off the radio around it.
 extern std::atomic<int64_t> g_relayActivityUs;
-// A background status read (poll, cloud-hint confirmation) holds the lock link.
+// A background status read (poll, confirming a cloud report) holds the lock link.
 // It must never cost a tap: RemoteNfcReader sets g_bleAbort when a tap arrives
 // during one, and the read stops within ~50 ms, keeping the session for the
 // unlock that follows. request(Unlock/Lock) does the same.
@@ -57,8 +57,8 @@ struct ble_gatt_attr;
  * door, battery) is tracked and reported - LockManager (HomeKit tile, MQTT lock
  * entity) and YALE_STATUS (MQTT door/battery) - from:
  *  - the lock's own answers to our commands (0xAA ack = moving, 0xBB = done),
- *  - status reads: at boot, every POLL_US, and CONFIRM_DELAY_US after a hint,
- *  - hints from the Yale cloud, forwarded by Home Assistant over MQTT: applied at
+ *  - status reads: at boot, every POLL_US, and CONFIRM_DELAY_US after a cloud report,
+ *  - the Yale cloud state, forwarded by Home Assistant over MQTT: applied at
  *    once (the cloud reports manual changes in 1-2 s), then confirmed by a read.
  * This lock's advertisements carry no state (its HomeKit side, the only source
  * of change broadcasts, can be down for hours), so reads are the ground truth.
@@ -90,7 +90,7 @@ private:
 
   // Messages from the NimBLE host task to the worker.
   enum class EvType : uint8_t { Synced, DiscFound, DiscSeen, DiscDone, Connected, ConnectFailed, Disconnected,
-                                GattDone, NotifySecure, NotifyCmd, NotifyDropped, Command, Advert, Hint };
+                                GattDone, NotifySecure, NotifyCmd, NotifyDropped, Command, Advert, Cloud };
   // Advert kinds (Ev::addrType): what changed in the lock's advertisement.
   enum : uint8_t { ADV_YALE = 1, ADV_HAP_GSN = 2, ADV_HAP_ENCRYPTED = 3 };
   struct Ev {
@@ -136,7 +136,7 @@ private:
   void listenTick();
   void onAdvert(const Ev &ev);
   bool readStatus(bool withBattery);  // true if it gave way to a tap/command
-  void handleHint(uint8_t lock, uint8_t door);
+  void handleCloud(uint8_t lock, uint8_t door);
   void setLockStatus(uint8_t v, uint8_t source);
   void setDoorStatus(uint8_t v);
   void reportLock(uint8_t source);   // LockManager: HomeKit tile + MQTT lock
@@ -148,7 +148,7 @@ private:
   int64_t m_lastBatteryUs = 0;
   int64_t m_nextPollUs = 0;
   bool m_abortable = false;  // waitFor() honours g_bleAbort (background reads only)
-  AppEventLoop::SubscriptionHandle m_hintSub;
+  AppEventLoop::SubscriptionHandle m_cloudSub;
   std::atomic<bool> m_listening{false};  // a listen burst is running (read by the host task)
   int64_t m_nextBurstUs = 0;
   int64_t m_statusDueUs = 0;    // 0: no status read pending
