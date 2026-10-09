@@ -740,9 +740,13 @@ deliberately wrong cloud "unlocked" was corrected by the read 15 s later. Reads 
    but **on battery 7172 false wakes in 6 h** were seen on 2026-10-09. The adaptive
    threshold and stats v2 (§3) are being tested now; watch `doorbell/stats`
    (`threshold`, `false_log`, `awake_pct`), ideally with the `build-diag` variant.
-   **Location may matter more than power:** the 7172 came while the doorbell sat in the
-   hallway near the door; the same build on battery on a desk the same afternoon showed
-   0 false wakes in 8 min. Compare `false_log` readings at each spot. A
+   **Most likely cause (not proven — that firmware recorded no readings):** a lasting
+   shift in the antenna reading when it was unplugged/moved at 07:33, which a fixed
+   threshold of 3 with triggering samples excluded from the average could never absorb
+   (re-arming does not reset the chip's running average). Mounting it on a metal plate
+   that afternoon reproduced the mechanism (162 → 154, 16 wakes until the adaptive
+   threshold reached 9); `am_aam` lets one wake absorb such a shift. To confirm:
+   unplug/move it a few times on the `am_aam` build — at most one false wake each. A
    healthy doorbell shows an awake share well under 0.1 %. Background: the battery fell
    3982 → 3540 mV in 9 h of testing on 2026-10-08, far more than taps and searches
    explain (~20 mAh).
