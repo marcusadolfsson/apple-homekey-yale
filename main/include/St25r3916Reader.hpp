@@ -120,6 +120,8 @@ public:
     // and the spread of the wake-up-mode readings that replaced it.
     uint8_t wakeUpDirectAmplitude() const { return m_wuDirectAmplitude; }
     uint8_t wakeUpSpread() const { return m_wuSpread; }
+    // The chip's running amplitude average (auto-averaging; see m_wuAutoAvg).
+    uint8_t wakeUpAverage();
 
     // State that must survive the host's deep sleep for the reader to resume
     // in wake-up mode without a reset: init() issues SET_DEFAULT, which would
@@ -210,6 +212,15 @@ private:
     AntennaReading m_wuRef;
     uint8_t m_wuDirectAmplitude = 0;
     uint8_t m_wuSpread = 0;
+    // Amplitude auto-averaging in wake-up mode (AMPLITUDE_MEASURE_CONF am_ae,
+    // weight am_aew: 0=4, 1=8, 2=16, 3=32 samples; RFAL uses 16). The chip
+    // compares each reading with a running average instead of a fixed
+    // reference, so slow drift is tracked while a phone - a jump within a
+    // fraction of a second - still trips it. Without it the doorbell woke every
+    // ~8 s on battery: the reference re-taken right after a 1.5 s poll at full
+    // drive was "warm", and the reading crept 3 steps above it as it settled
+    // (2026-10-08: 359 false wake-ups in 49 min, awake 33 % of the time).
+    static constexpr uint8_t WU_AUTO_AVG_WEIGHT = 2;  // 16 samples (~1.6 s at 100 ms)
     uint8_t m_savedEnFd = 0;  // external field detector setting to restore
     uint8_t m_savedTxDriver = 0;  // TX_DRIVER to restore after wake-up mode
 

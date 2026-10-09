@@ -612,8 +612,8 @@ void lpcdArm() {
   if (firstArm) {
     firstArm = false;
     ESP_LOGI(TAG, "wake-up armed: reference amplitude %u (measure command said %u, spread %u), "
-                  "IRQ line %d", ref.amplitude, g_st->wakeUpDirectAmplitude(), g_st->wakeUpSpread(),
-             gpio_get_level(PIN_NFC_IRQ));
+                  "running average %u, IRQ line %d", ref.amplitude, g_st->wakeUpDirectAmplitude(),
+             g_st->wakeUpSpread(), g_st->wakeUpAverage(), gpio_get_level(PIN_NFC_IRQ));
   } else {
     ESP_LOGD(TAG, "wake-up armed: reference amplitude %u, spread %u", ref.amplitude,
              g_st->wakeUpSpread());

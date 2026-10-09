@@ -41,7 +41,10 @@ constexpr uint8_t TX_DRIVER_D_RES_MASK = 0x0F;
 constexpr uint8_t REG_WUP_TIMER_CONTROL = 0x32;
 constexpr uint8_t REG_AMPLITUDE_MEASURE_CONF = 0x33;
 constexpr uint8_t REG_AMPLITUDE_MEASURE_REF = 0x34;
+constexpr uint8_t REG_AMPLITUDE_MEASURE_AA_RESULT = 0x35;  // auto-averaged reference
 constexpr uint8_t REG_AMPLITUDE_MEASURE_RESULT = 0x36;
+constexpr uint8_t AM_AE = 0x01;          // auto-averaging enable
+constexpr uint8_t AM_AEW_SHIFT = 1;      // auto-averaging weight, bits 2:1
 constexpr uint8_t REG_PHASE_MEASURE_CONF = 0x37;
 constexpr uint8_t REG_PHASE_MEASURE_REF = 0x38;
 constexpr uint8_t REG_PHASE_MEASURE_RESULT = 0x3A;
@@ -1111,8 +1114,9 @@ bool St25r3916Reader::startWakeUpMode(uint16_t periodMs, uint8_t amplitudeDelta,
     // Reference first, then the real delta, so there is no window in which
     // the old reference meets the tight delta.
     if (amplitudeDelta) {
-        writeReg(REG_AMPLITUDE_MEASURE_REF, m_wuRef.amplitude);
-        writeReg(REG_AMPLITUDE_MEASURE_CONF, static_cast<uint8_t>((amplitudeDelta & 0x0F) << 4));
+        writeReg(REG_AMPLITUDE_MEASURE_REF, m_wuRef.amplitude);  // also seeds the running average
+        writeReg(REG_AMPLITUDE_MEASURE_CONF,
+                 static_cast<uint8_t>(((amplitudeDelta & 0x0F) << 4) | (WU_AUTO_AVG_WEIGHT << AM_AEW_SHIFT) | AM_AE));
     }
     if (phaseDelta) {
         writeReg(REG_PHASE_MEASURE_REF, m_wuRef.phase);
@@ -1131,7 +1135,16 @@ uint8_t St25r3916Reader::takeWakeUpEvents(AntennaReading* lastMeasured) {
         readReg(REG_AMPLITUDE_MEASURE_RESULT, lastMeasured->amplitude);
         readReg(REG_PHASE_MEASURE_RESULT, lastMeasured->phase);
     }
+    // With auto-averaging the comparison was against the running average.
+    uint8_t avg = 0;
+    if ((irq & WAKE_AMPLITUDE) && readReg(REG_AMPLITUDE_MEASURE_AA_RESULT, avg)) m_wuRef.amplitude = avg;
     return irq & (WAKE_AMPLITUDE | WAKE_PHASE);
+}
+
+uint8_t St25r3916Reader::wakeUpAverage() {
+    uint8_t avg = 0;
+    if (m_dev) readReg(REG_AMPLITUDE_MEASURE_AA_RESULT, avg);
+    return avg;
 }
 
 bool St25r3916Reader::stopWakeUpMode() {

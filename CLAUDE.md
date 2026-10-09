@@ -421,6 +421,15 @@ does that one job and sleeps again. Build switch `DOORBELL_SLEEP` (default 1).
   searches explain (~20 mAh); suspect false reader wake-ups on battery (the
   drive cap was only verified on USB power). A healthy doorbell should show an
   awake share well under 0.1 %.
+  **Found and fixed the same night:** 359 false reader wake-ups in 49 min (one
+  every ~8 s, awake 33 % of the time) on a wall charger. Each false wake re-took
+  the wake-up reference right after 1.5 s of polling at full drive, while the
+  antenna was still "warm"; the reading crept 3 steps above it within seconds:
+  a loop. Fix: the ST25R3916's **amplitude auto-averaging** (`AMPLITUDE_MEASURE_CONF`
+  `am_ae`, weight 16 = RFAL's choice), so the chip compares against a running
+  average that tracks drift. Bench-test build in deep sleep: 0 false wake-ups in
+  12 min (≈90 expected before), 3/3 taps found 112 ms after wake-up (average 160,
+  phone 178–186).
 - **No base at power-up** (base down or out of range): on battery the search is
   bounded — 2 sweeps of 13 channels (~7 s), stretched to the 20 s cold-boot
   window — then `sleepWithoutBase()`, waking on the back-off timer (1, 2, 5,
