@@ -407,10 +407,15 @@ void RemoteNfcReader::noteBattery(const uint8_t *tail, size_t len) {
   // under 3.0 V is treated as "no battery". A protected 1S cell cuts out around
   // there anyway.
   if (mv < 3000 || mv > 6000) return;
-  const bool firstReport = m_batteryMv == 0;
-  const bool moved = m_batteryMv && (mv > m_batteryMv + 50 || mv + 50 < m_batteryMv);
+  // Compared with the last value PUBLISHED, not the last received: a slow change
+  // (charging, a drain) never moved 50 mV between two reports, so HA's battery
+  // sensor stayed frozen while the base's own value moved on.
+  const bool firstReport = m_batteryPublishedMv == 0;
+  const bool moved = !firstReport && (mv >= m_batteryPublishedMv + BATTERY_PUBLISH_STEP_MV ||
+                                      mv + BATTERY_PUBLISH_STEP_MV <= m_batteryPublishedMv);
   m_batteryMv = mv;
   if (firstReport || moved) {
+    m_batteryPublishedMv = mv;
     ESP_LOGI(TAG, "doorbell battery %u mV", mv);
     // EventValueChanged carries bytes, so millivolts travel in its string field.
     EventValueChanged ev{};

@@ -113,6 +113,8 @@ private:
   bool m_readerReady = false;
   int8_t m_linkRssi = 0;  // of the last frame heard from the doorbell
   uint16_t m_batteryMv = 0;  // 0 = unknown (no divider fitted / USB powered)
+  uint16_t m_batteryPublishedMv = 0;  // last value sent to MQTT
+  static constexpr uint16_t BATTERY_PUBLISH_STEP_MV = 20;
   void noteBattery(const uint8_t *tail, size_t len);
   // Heartbeat payload ahead of the battery: the doorbell's counters since power-up.
   void noteStats(const uint8_t *p, size_t len);
