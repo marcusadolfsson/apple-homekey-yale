@@ -145,6 +145,14 @@ bool MqttManager::begin(std::string deviceID) {
       // turns "unavailable" if the base stops reading.
       if (st.source == YALE_SRC_READ) publish(yaleTopic("read"), yaleLockWord(st.lock), 0, false);
     });
+    m_doorbell_stats = AppEventLoop::subscribe(HW_EVENT, HW_DOORBELL_STATS, [&](const uint8_t* data, size_t size){
+      if (size == 0 || data == nullptr) return;
+      std::span<const uint8_t> payload(data, size);
+      std::error_code ec;
+      EventValueChanged s = alpaca::deserialize<EventValueChanged>(payload, ec);
+      if (ec) return;
+      publish(m_mqttConfig.doorbellTopic + "/stats", s.str, 0, true);
+    });
     m_doorbell_battery = AppEventLoop::subscribe(HW_EVENT, HW_DOORBELL_BATTERY, [&](const uint8_t* data, size_t size){
       if (size == 0 || data == nullptr) return;
       std::span<const uint8_t> payload(data, size);
@@ -685,6 +693,34 @@ void MqttManager::publishHassDiscovery() {
         p.addBool("force_update", true);
         p.addNumber("expire_after", 900);  // 3 polls missed: the base has stopped reading the lock
         p.addString("icon", "mdi:lock-check");
+    });
+
+    // Where the doorbell's battery goes (counters since its power-up).
+    const std::string statsTopic = m_mqttConfig.doorbellTopic + "/stats";
+    publishConfig("Doorbell awake share", "sensor/" + m_mqttConfig.mqttClientId + "/doorbell_awake/config", [&](JsonBuilder& p) {
+        p.addString("unique_id", (deviceID + "_doorbell_awake").c_str());
+        p.addString("state_topic", statsTopic.c_str());
+        p.addString("value_template", "{{ value_json.awake_pct }}");
+        p.addString("unit_of_measurement", "%");
+        p.addString("state_class", "measurement");
+        p.addString("icon", "mdi:sleep-off");
+        p.addString("availability_topic", m_mqttConfig.lwtTopic.c_str());
+    });
+    publishConfig("Doorbell false wake-ups", "sensor/" + m_mqttConfig.mqttClientId + "/doorbell_false_wakes/config", [&](JsonBuilder& p) {
+        p.addString("unique_id", (deviceID + "_doorbell_false_wakes").c_str());
+        p.addString("state_topic", statsTopic.c_str());
+        p.addString("value_template", "{{ value_json.false_wakes }}");
+        p.addString("state_class", "total_increasing");
+        p.addString("icon", "mdi:alarm-light-outline");
+        p.addString("availability_topic", m_mqttConfig.lwtTopic.c_str());
+    });
+    publishConfig("Doorbell wake-ups", "sensor/" + m_mqttConfig.mqttClientId + "/doorbell_wakes/config", [&](JsonBuilder& p) {
+        p.addString("unique_id", (deviceID + "_doorbell_wakes").c_str());
+        p.addString("state_topic", statsTopic.c_str());
+        p.addString("value_template", "{{ value_json.wakes }}");
+        p.addString("state_class", "total_increasing");
+        p.addString("icon", "mdi:bell-ring-outline");
+        p.addString("availability_topic", m_mqttConfig.lwtTopic.c_str());
     });
 
     // Publish the doorbell button as a momentary binary sensor

@@ -121,6 +121,7 @@ private:
     AppEventLoop::SubscriptionHandle m_doorbell_button;
     AppEventLoop::SubscriptionHandle m_doorbell_battery;
     AppEventLoop::SubscriptionHandle m_yale_status;
+    AppEventLoop::SubscriptionHandle m_doorbell_stats;
     // Yale lock topics, under the client id: yale/status (JSON, retained),
     // yale/read (each BLE read; HA's expire_after flags a stale base) and
     // yale/cloud (in: the Yale cloud state, forwarded by Home Assistant).

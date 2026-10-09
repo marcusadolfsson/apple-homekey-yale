@@ -126,9 +126,15 @@ struct RtcState {
   uint8_t baseLost;     // asleep because no base answered: search again on waking
   uint8_t searchFails;  // consecutive failed searches, for the back-off
   uint8_t dresSwept;    // `dres` holds this power-up's sweep result
+  // Since power-up, reported to the base with every heartbeat (appendStats):
+  // where the battery goes.
+  int64_t powerOnUs;    // rtcNowUs() at power-up
+  uint32_t awakeMs;     // time spent awake, summed over every wake
+  uint32_t falseWakes;  // reader woke us but no card came
+  uint32_t searchMs;    // time spent searching channels for the base
 };
 RTC_DATA_ATTR RtcState g_rtc;
-constexpr uint32_t RTC_MAGIC = 0xD00B5703;
+constexpr uint32_t RTC_MAGIC = 0xD00B5704;
 
 // Keeps counting through deep sleep, unlike esp_timer_get_time().
 int64_t rtcNowUs() {
@@ -371,6 +377,25 @@ void batteryInit() {
 // voltage cannot change meaningfully between heartbeats, and that frame is
 // the one a tap cannot afford to delay.
 uint16_t g_batteryMv = 0;
+// Where the battery goes, since power-up, ahead of the battery bytes (the base
+// reads the battery from the last two bytes, so older bases still work):
+// 'S', version 1, up s (u32), awake ms (u32), wakes, reader wakes, false wakes,
+// button wakes, timer wakes, cards (u16 each), search ms (u32); little-endian.
+void appendStats(std::vector<uint8_t> &out) {
+  auto u16 = [&](uint32_t v) {
+    const uint16_t x = v > 0xFFFF ? 0xFFFF : uint16_t(v);
+    out.push_back(uint8_t(x)); out.push_back(uint8_t(x >> 8));
+  };
+  auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) out.push_back(uint8_t(v >> (8 * i))); };
+  out.push_back('S');
+  out.push_back(1);
+  u32(uint32_t((rtcNowUs() - g_rtc.powerOnUs) / 1000000));
+  u32(g_rtc.awakeMs + uint32_t(esp_timer_get_time() / 1000));  // including this wake so far
+  u16(g_rtc.wakes); u16(g_rtc.nfcWakes); u16(g_rtc.falseWakes);
+  u16(g_rtc.buttonWakes); u16(g_rtc.timerWakes); u16(g_rtc.taps);
+  u32(g_rtc.searchMs);
+}
+
 void appendBattery(std::vector<uint8_t> &out, bool fresh) {
   if (fresh) g_batteryMv = readBatteryMv();
   out.push_back(uint8_t(g_batteryMv & 0xFF));
@@ -623,6 +648,7 @@ bool lpcdGate() {
       return false;
     if (g_lpcdWakePending) {
       ++g_lpcdFalseWakes;
+      ++g_rtc.falseWakes;
       g_lpcdWakePending = false;
       ESP_LOGI(TAG, "wake-up was a false alarm: no card within %lld ms", LPCD_ACTIVE_US / 1000);
     }
@@ -730,6 +756,7 @@ void flushConsoleBeforeSleep() {
   esp_sleep_enable_timer_wakeup(uint64_t(waitS) * 1000000);
   ESP_LOGW(TAG, "no base station found (%u searches in a row); sleeping, next search in %lld s "
                 "or on the button%s", g_rtc.searchFails, waitS, nfcWake ? " or a tap" : "");
+  g_rtc.awakeMs += uint32_t(esp_timer_get_time() / 1000) + 200;  // + the console flush
   flushConsoleBeforeSleep();
   esp_deep_sleep_start();
 }
@@ -764,6 +791,7 @@ void flushConsoleBeforeSleep() {
            (unsigned long)g_rtc.wakes,
            (unsigned long)g_rtc.nfcWakes, (unsigned long)g_rtc.buttonWakes,
            (unsigned long)g_rtc.timerWakes, (unsigned long)g_rtc.taps);
+  g_rtc.awakeMs += uint32_t(esp_timer_get_time() / 1000) + 200;  // + the console flush
   flushConsoleBeforeSleep();
   esp_deep_sleep_start();
 }
@@ -982,6 +1010,11 @@ void findBase(int rounds = 0) {
   // The base sits on its access point's channel; walk the 2.4 GHz channels
   // until it answers a ping. The channel we last found it on is tried first,
   // so the usual case costs one ping rather than a sweep.
+  const int64_t searchT0 = esp_timer_get_time();
+  struct SearchTimer {
+    int64_t t0;
+    ~SearchTimer() { g_rtc.searchMs += uint32_t((esp_timer_get_time() - t0) / 1000); }
+  } searchTimer{searchT0};
   uint8_t seq = 0;
   const uint8_t first = (g_channel >= 1 && g_channel <= 13) ? g_channel : 1;
   std::vector<uint8_t> order{first};
@@ -1078,6 +1111,7 @@ extern "C" void app_main() {
     g_stayAwakeUntilUs = WAKE_MIN_AWAKE_US;
   } else {
     std::memset(&g_rtc, 0, sizeof(g_rtc));
+    g_rtc.powerOnUs = rtcNowUs();
     g_stayAwakeUntilUs = COLD_BOOT_AWAKE_US;
   }
 
@@ -1212,6 +1246,7 @@ extern "C" void app_main() {
       if (g_baseKnown && !g_tagActive && rtcNowUs() - g_rtc.lastHeartbeatUs > heartbeatEvery) {
         g_rtc.lastHeartbeatUs = rtcNowUs();
         std::vector<uint8_t> hb;
+        appendStats(hb);
         appendBattery(hb, true);
         send(g_base, relay::Op::HealthRsp, 0, g_readerReady ? 2 : 0, hb.data(), hb.size());
         g_hbAcked = false;
@@ -1225,6 +1260,7 @@ extern "C" void app_main() {
         // Resend before concluding anything: a single frame is easily lost.
         ++g_hbTries;
         std::vector<uint8_t> hb;
+        appendStats(hb);
         appendBattery(hb, false);
         send(g_base, relay::Op::HealthRsp, 0, g_readerReady ? 2 : 0, hb.data(), hb.size());
         g_hbAckDeadlineUs = esp_timer_get_time() + HEARTBEAT_ACK_WAIT_US;
@@ -1246,6 +1282,7 @@ extern "C" void app_main() {
           // battery, so the base would show "not fitted" for another hour: send
           // the heartbeat again now (and stay up for its ack).
           std::vector<uint8_t> hb;
+          appendStats(hb);
           appendBattery(hb, false);
           send(g_base, relay::Op::HealthRsp, 0, g_readerReady ? 2 : 0, hb.data(), hb.size());
           g_hbAcked = false;

@@ -411,6 +411,16 @@ does that one job and sleeps again. Build switch `DOORBELL_SLEEP` (default 1).
   (`sendConfirmed`); undelivered → search → resend. Measured on 10-08: a base
   restart at 15:31 was only noticed at the 16:23 heartbeat (52 min) — taps in
   between would have failed.
+- **Where the battery goes (2026-10-08):** every heartbeat carries counters
+  since power-up ahead of the battery bytes (`appendStats`: `'S'`, v1, up s,
+  awake ms, wakes / reader wakes / false wakes / button / timer, cards, search
+  ms). The base logs them (at most every 10 min) and publishes JSON to
+  `<clientId>/doorbell/stats` (retained) with HA sensors "Doorbell awake share"
+  (%), "Doorbell false wake-ups", "Doorbell wake-ups". Added after the battery
+  fell 3982 → 3540 mV in 9 h of testing on 10-08 — far more than taps and
+  searches explain (~20 mAh); suspect false reader wake-ups on battery (the
+  drive cap was only verified on USB power). A healthy doorbell should show an
+  awake share well under 0.1 %.
 - **No base at power-up** (base down or out of range): on battery the search is
   bounded — 2 sweeps of 13 channels (~7 s), stretched to the 20 s cold-boot
   window — then `sleepWithoutBase()`, waking on the back-off timer (1, 2, 5,

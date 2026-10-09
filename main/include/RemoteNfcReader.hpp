@@ -114,6 +114,9 @@ private:
   int8_t m_linkRssi = 0;  // of the last frame heard from the doorbell
   uint16_t m_batteryMv = 0;  // 0 = unknown (no divider fitted / USB powered)
   void noteBattery(const uint8_t *tail, size_t len);
+  // Heartbeat payload ahead of the battery: the doorbell's counters since power-up.
+  void noteStats(const uint8_t *p, size_t len);
+  int64_t m_lastStatsLogUs = 0;
   // The doorbell runs the same shape of loop NfcManager::pollingTask() runs for
   // a local reader (500 ms listen window), but with a tighter gap between
   // cycles: the doorbell has nothing else to do. LISTEN_WINDOW_MS is how long the

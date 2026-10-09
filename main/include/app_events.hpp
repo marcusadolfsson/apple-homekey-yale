@@ -28,6 +28,7 @@ enum {
     HW_ACTION,
     HW_DOORBELL_BUTTON,   // someone pressed the doorbell button
     HW_DOORBELL_BATTERY,  // doorbell reported its battery voltage
+    HW_DOORBELL_STATS,    // doorbell's wake/awake counters since power-up (JSON in EventValueChanged::str)
     HW_ALT_ACTION,
     HW_CONFIG_CHANGED,
 };
