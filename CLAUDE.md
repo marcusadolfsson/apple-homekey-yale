@@ -193,6 +193,13 @@ advertise again; that is handled with a longer direct-connect timeout
   HA sensor with `force_update` + `expire_after` 900 s, so it goes unavailable if
   the base stops reading). Discovery adds a door `binary_sensor`, a lock battery
   voltage sensor and that read sensor.
+- **Door in Apple Home:** with Yale BLE enabled the HK accessory also has a
+  **Contact Sensor** service ("Door"), fed from the same door state (cloud report
+  or read). HomeKit's lock service has no door state the Home app shows; locks
+  with a door sensor add a contact sensor to the same accessory. Battery: the
+  optional Battery service ("SmartLock Battery Reporting") gets the Yale cloud %
+  from HA (`homekit/set_battery_lvl`); HA re-sends lock state and battery 5 s
+  after the base's `status` goes `online`.
 - **Commands:** HomeKit / MQTT "lock" now locks (`0x0B`); a failed command puts
   the tile back to the last known state and reads again 15 s later.
 - **Measured 2026-10-08** with HA's forwarder live (`automation.homekey_forward_yale_cloud…`):

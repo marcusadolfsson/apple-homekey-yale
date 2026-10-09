@@ -193,6 +193,14 @@ boolean HomeKitLock::NFCAccessService::update() {
  * @param bridge The HomeKitLock instance to configure; its `m_statusLowBattery` is set to 0
  *               and its `m_batteryLevel` is set to 100. 
  */
+HomeKitLock::DoorContactService::DoorContactService(HomeKitLock& bridge) {
+    ESP_LOGI(HomeKitLock::TAG, "Configuring the door contact sensor (Yale door sensor)");
+    new Characteristic::Name("Door");
+    // 0 = contact detected (closed), 1 = not detected (open). Restored from NVS
+    // until the base's first read of the lock.
+    bridge.m_doorContact = new Characteristic::ContactSensorState(0, true);
+}
+
 HomeKitLock::PhysicalLockBatteryService::PhysicalLockBatteryService(HomeKitLock& bridge) {
     ESP_LOGI(HomeKitLock::TAG, "Configuring PhysicalLockBattery");
     bridge.m_statusLowBattery = new Characteristic::StatusLowBattery(0, true);

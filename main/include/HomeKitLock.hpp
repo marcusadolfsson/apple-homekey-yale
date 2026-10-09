@@ -37,6 +37,7 @@ private:
     SpanCharacteristic* m_lockTargetState;
     SpanCharacteristic* m_statusLowBattery;
     SpanCharacteristic* m_batteryLevel;
+    SpanCharacteristic* m_doorContact = nullptr;  // Yale door sensor, when the lock is driven over BLE
 
     LockManager& m_lockManager;
     ConfigManager& m_configManager;
@@ -56,6 +57,7 @@ private:
     static const char* TAG;
     AppEventLoop::SubscriptionHandle m_lock_state_changed;
     AppEventLoop::SubscriptionHandle m_hk_event;
+    AppEventLoop::SubscriptionHandle m_yale_status;
 
     struct NFCAIS : Service::AccessoryInformation {
       NFCAIS(const espConfig::misc_config_t& config);
@@ -78,5 +80,11 @@ private:
     };
     struct PhysicalLockBatteryService : Service::BatteryService {
         PhysicalLockBatteryService(HomeKitLock& bridge);
+    };
+    // The door position from the Yale's door sensor. HomeKit's lock service has
+    // no door state the Home app shows; locks with a door sensor add a contact
+    // sensor to the same accessory, which Apple Home shows as Open / Closed.
+    struct DoorContactService : Service::ContactSensor {
+        DoorContactService(HomeKitLock& bridge);
     };
 };

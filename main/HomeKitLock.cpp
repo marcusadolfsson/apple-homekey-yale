@@ -101,6 +101,20 @@ void HomeKitLock::begin() {
         ESP_LOGI(TAG, "Received lock state event: %d -> %d", m_lockTargetState->getVal(), s.targetState);
         updateLockState(s.currentState, s.targetState);
     });
+    m_yale_status = AppEventLoop::subscribe(LOCK_EVENT, YALE_STATUS, [&](const uint8_t* data, size_t size){
+        if(size == 0 || data == nullptr || !m_doorContact) return;
+        std::span<const uint8_t> payload(data, size);
+        std::error_code ec;
+        EventYaleStatus st = alpaca::deserialize<EventYaleStatus>(payload, ec);
+        if(ec) return;
+        // Yale door codes: 0x01 closed, 0x02 ajar, 0x03 open; anything else unknown (leave as is).
+        if(st.door < 0x01 || st.door > 0x03) return;
+        const int contact = st.door == 0x01 ? 0 : 1;
+        if(m_doorContact->getNewVal() != contact) {
+            ESP_LOGI(TAG, "Door contact -> %s", contact ? "open" : "closed");
+            m_doorContact->setVal(contact);
+        }
+    });
     const auto& miscConfig = m_configManager.getConfig<espConfig::misc_config_t>();
     const auto& app_version = esp_app_get_description()->version;
     ESP_LOGI(TAG, "Starting HomeSpan setup...");
@@ -158,6 +172,9 @@ void HomeKitLock::begin() {
       new NFCAccessService(m_readerDataManager);
       if(miscConfig.proxBatEnabled) {
           new PhysicalLockBatteryService(*this);
+      }
+      if(miscConfig.yaleBleEnabled) {
+          new DoorContactService(*this);
       }
 
     setupDebugCommands();
