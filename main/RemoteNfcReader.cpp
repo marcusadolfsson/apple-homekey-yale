@@ -267,6 +267,8 @@ void RemoteNfcReader::rxTask() {
 
     auto *r = new Response{h.op, h.seq, h.flags, std::move(payload)};
     const bool tagEvent = relay::Op(h.op) == relay::Op::TagEvent;
+    if (tagEvent || relay::Op(h.op) == relay::Op::ApduRsp)
+      g_relayActivityUs.store(esp_timer_get_time(), std::memory_order_relaxed);
     if (tagEvent) {
       r->receivedUs = esp_timer_get_time();
       // While the BLE link holds the radio the card exchange cannot run (a
@@ -281,6 +283,14 @@ void RemoteNfcReader::rxTask() {
       // unlock, out of range the new attempt was just as doomed, and with a
       // fast reader the same phone re-detected ~300 ms later aborted the unlock
       // it had just started (its own unlock then fell in the de-dupe window).
+      // A background status read gives way to a tap: ask it to stop (within
+      // ~50 ms) and drop this announcement; the doorbell repeats it every
+      // 250 ms and the next one gets through.
+      if (g_bleBackgroundRead.load()) {
+        g_bleAbort.store(true);
+        delete r;
+        continue;
+      }
       if (g_bleRadioBusy.load(std::memory_order_acquire)) {
         const int64_t now = esp_timer_get_time();
         if (now - m_lastBusyDropLogUs > 5000000) {

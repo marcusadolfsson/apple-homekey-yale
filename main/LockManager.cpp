@@ -129,6 +129,10 @@ void LockManager::stopMomentaryTimer() {
 }
 
 void LockManager::startMomentaryTimerIfNeeded(Source source) {
+    // With the Yale driven over BLE the tile shows the lock's real state, which
+    // YaleBleLock reports; a timer flipping it back to "locked" would lie (the
+    // mortise stays unlocked until it relocks itself).
+    if (m_miscConfig.yaleBleEnabled) return;
     uint8_t momentarySources = (((m_actionsConfig.gpioActionMomentaryEnabled |
                                   m_actionsConfig.gpioActionPin) == 255) &
                                 !m_actionsConfig.hkDumbSwitchMode)

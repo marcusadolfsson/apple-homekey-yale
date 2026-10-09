@@ -33,6 +33,16 @@ struct EventLockState {
   uint8_t source = 0;
 };
 
+// Yale lock state in the lock's own codes (yalexs-ble LockStatus / DoorStatus);
+// 0xFF = unknown / not part of this report.
+struct EventYaleStatus {
+  uint8_t lock = 0xFF;
+  uint8_t door = 0xFF;
+  uint16_t batteryMv = 0;
+  uint8_t source = 0;  // YaleSource
+};
+enum YaleSource : uint8_t { YALE_SRC_READ = 0, YALE_SRC_COMMAND = 1, YALE_SRC_CLOUD = 2 };
+
 struct EventBinaryStatus {
   bool status;
 };

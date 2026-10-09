@@ -17,6 +17,15 @@
 // other: connecting took 9.5 s alongside 10 polls/s, against 1.9 s on a quiet
 // radio. RemoteNfcReader pauses polling while this is set.
 extern std::atomic<bool> g_bleRadioBusy;
+// esp_timer time of the last card traffic from the doorbell (tag announcement
+// or APDU response). Advertisement listening keeps off the radio around it.
+extern std::atomic<int64_t> g_relayActivityUs;
+// A background status read (poll, cloud-hint confirmation) holds the lock link.
+// It must never cost a tap: RemoteNfcReader sets g_bleAbort when a tap arrives
+// during one, and the read stops within ~50 ms, keeping the session for the
+// unlock that follows. request(Unlock/Lock) does the same.
+extern std::atomic<bool> g_bleBackgroundRead;
+extern std::atomic<bool> g_bleAbort;
 
 namespace espConfig { struct misc_config_t; }
 struct ble_gap_event;
@@ -43,11 +52,16 @@ struct ble_gatt_attr;
  *    frame of the connection in each direction. Frames start 0xEE (command) or
  *    0xAA/0xBB (ack/result) with an 8-bit checksum at 0x03.
  *
- * Behaviour: unlock only, fire and forget. A successful HomeKey tap (with
- * lockAlwaysUnlock) or a Home app "unlock" on the reader sends UNLOCK; "lock" is
- * ignored because the mortise relocks itself. The reader does not track the lock's
- * state (Home Assistant and the lock's own HomeKit module do), which also suits a
- * battery reader that should talk to the lock as little as possible.
+ * Behaviour: a successful HomeKey tap (with lockAlwaysUnlock) sends UNLOCK; the
+ * Home app, HomeKit and MQTT can lock and unlock. The lock's real state (lock,
+ * door, battery) is tracked and reported - LockManager (HomeKit tile, MQTT lock
+ * entity) and YALE_STATUS (MQTT door/battery) - from:
+ *  - the lock's own answers to our commands (0xAA ack = moving, 0xBB = done),
+ *  - status reads: at boot, every POLL_US, and CONFIRM_DELAY_US after a hint,
+ *  - hints from the Yale cloud, forwarded by Home Assistant over MQTT: applied at
+ *    once (the cloud reports manual changes in 1-2 s), then confirmed by a read.
+ * This lock's advertisements carry no state (its HomeKit side, the only source
+ * of change broadcasts, can be down for hours), so reads are the ground truth.
  *
  * The connection is opened on demand, held about 5 s after the command (as
  * yalexs-ble does), then closed so the Yale app, Apple Home and Home Assistant can
@@ -76,7 +90,9 @@ private:
 
   // Messages from the NimBLE host task to the worker.
   enum class EvType : uint8_t { Synced, DiscFound, DiscSeen, DiscDone, Connected, ConnectFailed, Disconnected,
-                                GattDone, NotifySecure, NotifyCmd, NotifyDropped, Command };
+                                GattDone, NotifySecure, NotifyCmd, NotifyDropped, Command, Advert, Hint };
+  // Advert kinds (Ev::addrType): what changed in the lock's advertisement.
+  enum : uint8_t { ADV_YALE = 1, ADV_HAP_GSN = 2, ADV_HAP_ENCRYPTED = 3 };
   struct Ev {
     EvType type;
     int status = 0;  // also: rssi for DiscSeen, length for NotifyDropped
@@ -115,6 +131,31 @@ private:
   void clearCache();
   bool waitFor(EvType type, uint32_t timeoutMs, Ev &out);
   void cooldown();
+
+  // Advertisement listening (CONFIG_YALE_BLE_LISTEN)
+  void listenTick();
+  void onAdvert(const Ev &ev);
+  bool readStatus(bool withBattery);  // true if it gave way to a tap/command
+  void handleHint(uint8_t lock, uint8_t door);
+  void setLockStatus(uint8_t v, uint8_t source);
+  void setDoorStatus(uint8_t v);
+  void reportLock(uint8_t source);   // LockManager: HomeKit tile + MQTT lock
+  void reportStatus(uint8_t source); // YALE_STATUS: MQTT door / battery / read
+  // Real lock state, lock's own codes; 0xFF = not known yet.
+  uint8_t m_lockStatus = 0xFF;
+  uint8_t m_doorStatus = 0xFF;
+  uint16_t m_batteryMv = 0;
+  int64_t m_lastBatteryUs = 0;
+  int64_t m_nextPollUs = 0;
+  bool m_abortable = false;  // waitFor() honours g_bleAbort (background reads only)
+  AppEventLoop::SubscriptionHandle m_hintSub;
+  std::atomic<bool> m_listening{false};  // a listen burst is running (read by the host task)
+  int64_t m_nextBurstUs = 0;
+  int64_t m_statusDueUs = 0;    // 0: no status read pending
+  int64_t m_lastOwnOpUs = 0;    // last lock/unlock we sent
+  int64_t m_listenStatsUs = 0;
+  uint32_t m_bursts = 0, m_burstsSkipped = 0;
+  std::atomic<uint32_t> m_lockAdverts{0};  // lock advertisements heard (host task increments)
 
   // Crypto helpers
   void ecbSetKey(const uint8_t *key16);

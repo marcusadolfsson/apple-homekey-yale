@@ -152,16 +152,53 @@ Hard-won details:
 - Address type and GATT handles are cached in NVS (namespace `yaleble`), so a cold
   start connects directly with no scan or discovery.
 
-**Behaviour: unlock only, fire and forget.** The reader does not track lock state;
-HA and the lock's own HomeKit module do that. A mortise nexTouch relocks itself.
-The unlock command returns on the lock's **ack (`0xAA`, tens of ms)**, not its
-**result (`0xBB`, ~1.8 s later when the motor stops)**: nothing depends on the
-result, and waiting for it held the shared radio — and so every tap — for the
-whole mechanical cycle. The result arrives during the 5 s linger and is logged
-(`lock reports unlock done`). After our own disconnect the lock is slow to
+**Behaviour (2026-10-08): the base tracks the lock's real state** — before this
+it was unlock-only, fire and forget. Commands still return on the lock's **ack
+(`0xAA`, tens of ms)**, not its **result (`0xBB`, ~1.8 s later when the motor
+stops)**, so a tap never holds the radio for the mechanical cycle; the result
+arrives during the 5 s linger. After our own disconnect the lock is slow to
 advertise again; that is handled with a longer direct-connect timeout
-(`CONNECT_MS`), never a scan — a direct connect waits for the advertisement
-exactly as a scan would.
+(`CONNECT_MS`), never a scan.
+
+- **State sources:** the lock's own answers to our commands (`0xAA` = moving,
+  `0xBB` = done; a non-zero result = jammed, as yalexs-ble), and **status reads**
+  (GETSTATUS lock `0x02`, door `0x2E`, battery `0x0F` every 6 h; byte 8, battery
+  bytes 8–9 in mV) at boot +5 s, every **5 min** (`POLL_US`), and 10 s after a
+  cloud hint that changed the state (`CONFIRM_DELAY_US`). A read takes ~1.8–3.4 s.
+- **Cloud hints:** Home Assistant forwards the Yale cloud's state (the cloud sees
+  keypad/thumb-turn/door changes within 1–2 s) to `<clientId>/yale/hint`:
+  `locked` / `unlocked` / `jammed` / `door_open` / `door_closed`. Applied at once,
+  then confirmed by a read; a hint repeating what we know (our own unlock echoed
+  back) costs no read. The base's read is the authority.
+- **Reads never cost a tap:** a read waits while card traffic is under way
+  (`RELAY_QUIET_US`) and, if a tap arrives during one, `RemoteNfcReader` sets
+  `g_bleAbort` and drops that announcement; the read stops within ~50 ms
+  (`waitFor` slices) and keeps the session, and the doorbell's next announcement
+  (250 ms later) goes through and unlocks on the open session. `request(Unlock|Lock)`
+  pre-empts a read the same way. An aborted connect does not count as an
+  out-of-range failure.
+- **Reported to:** LockManager via `LOCK_OVERRIDE_STATE` (the HomeKit tile and the
+  MQTT lock entity show the real state; moving states set only the target, so the
+  tile says "Unlocking…"); the momentary snap-back to "locked" is off while Yale
+  BLE is enabled. `YALE_STATUS` → MQTT `<clientId>/yale/status` (JSON lock, door,
+  battery_mv, source; retained) and `<clientId>/yale/read` (each read, not retained;
+  HA sensor with `force_update` + `expire_after` 900 s, so it goes unavailable if
+  the base stops reading). Discovery adds a door `binary_sensor`, a lock battery
+  voltage sensor and that read sensor.
+- **Commands:** HomeKit / MQTT "lock" now locks (`0x0B`); a failed command puts
+  the tile back to the last known state and reads again 15 s later.
+
+**Why polling and not push (measured 2026-10-08):** this lock's advertisement is
+`020106 030224FE 04FFD10101` + a scan response with the 18-byte Yale ID and name
+`M50067E`. The one-byte Yale flag stayed `01` through manual lock/unlock, and
+there is no HAP advertisement (Apple `0x004C` type `06`) at all while the lock's
+HomeKit side is down — Apple Home "No Response" from ~14:00 that day, "Accessory
+not found" on re-add, even after a battery pull. yalexs-ble's push depends
+entirely on the HAP GSN (or a Yale flag change), so HA's `yalexs_ble` entities
+froze too. `CONFIG_YALE_BLE_LISTEN` (off) keeps a 5 %-duty listener for the GSN
+should HomeKit come back; with it on, 7 taps showed no Auth0 errors but the
+sample was too small to judge lock-connect latency (median 1.71 s vs 1.33 s
+baseline, both with HA also connecting to the lock).
 
 ## Relay protocol (`main/RelayProtocol.hpp`)
 
@@ -463,18 +500,14 @@ which is *not encrypted* — enable flash encryption before deploying.
 
 ## Known issues / next steps
 
-1. **Lock state is not tracked.** `GETSTATUS` replies are logged, not parsed; the
-   MQTT lock state is HomeSpan's optimistic virtual state, and there is no `lock`
-   command route (the opcode is implemented). Home Assistant's `yalexs_ble` proxy is
-   still the only thing that knows the lock's true state, including keypad and
-   manual operations, because it parses BLE advertisements passively — we connect on
-   demand and drop the link after 5 s. Replacing the proxy means (a) parse status
-   and publish it, route `lock`, report the unlock result; then (b) passive
-   advertisement scanning, which must be measured against tap latency first: one
-   radio, and continuous BLE RX cost 3–4× on connect time when tried via WiFi PS.
-2. **The base follows its AP's channel** and the AP roams; a tap in the ~30 s
-   before the doorbell re-scans is lost. If that is common, add a send-failure
-   callback on the doorbell so it re-scans in a second rather than thirty.
+1. **Lock state is tracked as of 2026-10-08** (see the Yale section): reads +
+   cloud hints. Still to do: point HA's automations at the base's MQTT lock and
+   disable `yalexs_ble`, so the base is the lock's only BLE client; and the HA
+   automation that forwards the Yale cloud state to `<clientId>/yale/hint`.
+2. **The base follows its AP's channel** and the AP roams. A sleeping doorbell
+   finds out when a tap or button press goes unanswered and searches then
+   (`researchBase`, see the deep-sleep section), so a tap after a channel change
+   costs a few seconds rather than failing.
    (The re-scan itself was dead code until 2026-09-16: it sat below the
    `pollOnce(); continue;` in the main loop, so a polling doorbell never reached
    it and stayed parked on a dead channel until power-cycled. Anything that must

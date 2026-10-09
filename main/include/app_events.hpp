@@ -7,6 +7,8 @@ enum {
     LOCK_UPDATE_STATE,
     LOCK_TARGET_STATE_CHANGED,
     LOCK_OVERRIDE_STATE,
+    YALE_STATUS,  // YaleBleLock: what the lock reported (lock, door, battery)
+    YALE_HINT,    // MQTT: a hint from the Yale cloud (via Home Assistant) that the lock changed
 };
 
 ESP_EVENT_DECLARE_BASE(NFC_EVENT);

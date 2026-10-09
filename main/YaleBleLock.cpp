@@ -21,6 +21,9 @@
 
 YaleBleLock *YaleBleLock::s_instance = nullptr;
 std::atomic<bool> g_bleRadioBusy{false};
+std::atomic<int64_t> g_relayActivityUs{0};
+std::atomic<bool> g_bleBackgroundRead{false};
+std::atomic<bool> g_bleAbort{false};
 
 namespace {
 
@@ -46,6 +49,66 @@ constexpr uint8_t OP_UNLOCK = 0x0A;
 constexpr uint8_t OP_LOCK = 0x0B;
 constexpr uint8_t STATUS_LOCK_ONLY = 0x02;
 constexpr uint8_t STATUS_DOOR_AND_LOCK = 0x2F;
+constexpr uint8_t STATUS_DOOR_ONLY = 0x2E;
+constexpr uint8_t STATUS_BATTERY = 0x0F;
+
+#ifdef CONFIG_YALE_BLE_LISTEN
+constexpr bool LISTEN = true;
+#else
+constexpr bool LISTEN = false;
+#endif
+// One short passive burst per period: ~5% of the radio. A HomeKit accessory
+// advertises every ~20 ms for a few seconds after its state changes, so a
+// 50 ms window each second still catches a change within about a second.
+constexpr uint32_t LISTEN_PERIOD_MS = 1000;
+constexpr uint32_t LISTEN_WINDOW_MS = 50;
+// Stay off the radio this long after doorbell card traffic.
+constexpr int64_t RELAY_QUIET_US = 3000000;
+// After our own lock/unlock the advertisement changes too; read state only once
+// the motor has finished (yalexs-ble's LOCK_STALE_STATE_DEBOUNCE_DELAY).
+constexpr int64_t OWN_OP_SETTLE_US = 6100000;
+constexpr int64_t ADVERT_COALESCE_US = 100000;
+// Status reads. The lock gives no change signal over BLE (see the class
+// comment), so read at boot, then every POLL_US, and CONFIRM_DELAY_US after a
+// cloud hint changes the state. A read connects for ~1-3 s; battery is read
+// only every BATTERY_REFRESH_US (it moves slowly). A read waits while a tap is
+// under way (RELAY_QUIET_US) and gives way at once if one starts.
+constexpr int64_t POLL_US = 5LL * 60 * 1000000;
+constexpr int64_t BOOT_READ_DELAY_US = 5000000;
+constexpr int64_t CONFIRM_DELAY_US = 10000000;
+constexpr int64_t BATTERY_REFRESH_US = 6LL * 3600 * 1000000;
+constexpr int64_t READ_RETRY_US = 2000000;
+// After a command fails (lock out of reach), read again soon so the tile does
+// not stay on "unlocking".
+constexpr int64_t AFTER_FAILURE_READ_US = 15000000;
+
+constexpr uint8_t YALE_UNLOCKING = 0x02, YALE_UNLOCKED = 0x03, YALE_LOCKING = 0x04, YALE_LOCKED = 0x05,
+                  YALE_JAMMED = 0x07, YALE_SECURE = 0x0C;
+
+const char *lockStatusName(uint8_t v) {
+  switch (v) {
+    case 0x00: return "unknown";
+    case 0x01: return "calibrating";
+    case 0x02: return "unlocking";
+    case 0x03: return "unlocked";
+    case 0x04: return "locking";
+    case 0x05: return "locked";
+    case 0x06: return "pol-discovery";
+    case 0x07: return "jammed";
+    case 0x0C: return "secure mode";
+  }
+  return "?";
+}
+const char *doorStatusName(uint8_t v) {
+  switch (v) {
+    case 0x00: return "unknown";
+    case 0x01: return "closed";
+    case 0x02: return "ajar";
+    case 0x03: return "open";
+    case 0x04: return "unknown(4)";
+  }
+  return "?";
+}
 
 // A scan holds the shared radio, and the relay reader drops tag announcements
 // while it runs: with the lock out of range a 30 s scan blinded the doorbell
@@ -209,9 +272,22 @@ void YaleBleLock::begin() {
     std::span<const uint8_t> payload(data, size);
     EventLockState s = alpaca::deserialize<EventLockState>(payload, ec);
     if (ec) return;
-    // Unlock only: the mortise relocks itself.
     if (s.targetState == LockManager::UNLOCKED) request(Cmd::Unlock);
+    else if (s.targetState == LockManager::LOCKED) request(Cmd::Lock);
   });
+  m_hintSub = AppEventLoop::subscribe(LOCK_EVENT, YALE_HINT, [this](const uint8_t *data, size_t size) {
+    if (size == 0 || data == nullptr) return;
+    std::error_code ec;
+    std::span<const uint8_t> payload(data, size);
+    EventYaleStatus h = alpaca::deserialize<EventYaleStatus>(payload, ec);
+    if (ec) return;
+    Ev ev{};
+    ev.type = EvType::Hint;
+    ev.frame[0] = h.lock;
+    ev.frame[1] = h.door;
+    post(ev);
+  });
+  m_nextPollUs = esp_timer_get_time() + BOOT_READ_DELAY_US;
 
   loadCache();
   xTaskCreate(taskEntry, "yale_ble", 6144, this, 5, &m_task);
@@ -219,6 +295,7 @@ void YaleBleLock::begin() {
 
 void YaleBleLock::request(Cmd cmd) {
   if (!m_events) return;
+  if ((cmd == Cmd::Unlock || cmd == Cmd::Lock) && g_bleBackgroundRead.load()) g_bleAbort.store(true);
   Ev ev{};
   ev.type = EvType::Command;
   ev.cmd = cmd;
@@ -254,6 +331,46 @@ int YaleBleLock::gapEvent(ble_gap_event *event, void *arg) {
   switch (event->type) {
     case BLE_GAP_EVENT_DISC: {
       const auto &a = event->disc.addr;
+      if (self->m_listening.load(std::memory_order_relaxed)) {
+        // Listen burst: only the lock's own advertisement matters. Post only
+        // changes; this runs on the NimBLE host task and must stay cheap.
+        for (int i = 0; i < 6; ++i)
+          if (a.val[i] != self->m_mac[5 - i]) return 0;
+        self->m_lockAdverts.fetch_add(1, std::memory_order_relaxed);
+        ble_hs_adv_fields f{};
+        if (ble_hs_adv_parse_fields(&f, event->disc.data, event->disc.length_data) != 0) return 0;
+        if (!f.mfg_data || f.mfg_data_len < 3) return 0;
+        static int lastYale = -1, lastGsn = -1;
+        static int64_t lastEncUs = 0;
+        const uint16_t company = f.mfg_data[0] | f.mfg_data[1] << 8;
+        Ev adv{};
+        adv.type = EvType::Advert;
+        adv.status = event->disc.rssi;
+        if (company == 465 && f.mfg_data_len == 3) {  // one-byte Yale state flag
+          if (f.mfg_data[2] == lastYale) return 0;
+          lastYale = f.mfg_data[2];
+          adv.addrType = ADV_YALE;
+          adv.frame[0] = f.mfg_data[2];
+        } else if (company == 76 && f.mfg_data[2] == 0x06 && f.mfg_data_len >= 2 + 13) {
+          // HAP advertisement: GSN (global state number) at payload offset 11.
+          const int gsn = f.mfg_data[2 + 11] | f.mfg_data[2 + 12] << 8;
+          if (gsn == lastGsn) return 0;
+          lastGsn = gsn;
+          adv.addrType = ADV_HAP_GSN;
+          adv.frame[0] = gsn & 0xFF;
+          adv.frame[1] = gsn >> 8;
+        } else if (company == 76 && f.mfg_data[2] == 0x11) {
+          // Encrypted HAP notification: sent only when state changed.
+          const int64_t now = esp_timer_get_time();
+          if (now - lastEncUs < 2000000) return 0;
+          lastEncUs = now;
+          adv.addrType = ADV_HAP_ENCRYPTED;
+        } else {
+          return 0;
+        }
+        self->post(adv);
+        return 0;
+      }
       s_advReports++;
       {
         ble_hs_adv_fields fields{};
@@ -419,10 +536,13 @@ void YaleBleLock::taskEntry(void *arg) {
 bool YaleBleLock::waitFor(EvType type, uint32_t timeoutMs, Ev &out) {
   const int64_t deadline = esp_timer_get_time() + int64_t(timeoutMs) * 1000;
   while (true) {
+    if (m_abortable && g_bleAbort.load()) return false;
     int64_t remainMs = (deadline - esp_timer_get_time()) / 1000;
     if (remainMs <= 0) return false;
+    // A background read checks for a waiting tap every 50 ms.
+    const int64_t sliceMs = m_abortable ? std::min<int64_t>(remainMs, 50) : remainMs;
     Ev ev{};
-    if (xQueueReceive(m_events, &ev, pdMS_TO_TICKS(remainMs)) != pdTRUE) return false;
+    if (xQueueReceive(m_events, &ev, pdMS_TO_TICKS(sliceMs)) != pdTRUE) continue;
     if (ev.type == type) {
       out = ev;
       return true;
@@ -519,6 +639,29 @@ void YaleBleLock::run() {
         continue;
       }
       wait = pdMS_TO_TICKS(remainMs);
+    } else {
+      if (LISTEN) listenTick();
+      int64_t now = esp_timer_get_time();
+      if (now >= m_nextPollUs && (!m_statusDueUs || m_statusDueUs > now)) m_statusDueUs = now;
+      if (m_statusDueUs && now >= m_statusDueUs) {
+        if (g_bleRadioBusy.load() || now - g_relayActivityUs.load() < RELAY_QUIET_US) {
+          m_statusDueUs = now + READ_RETRY_US;  // a tap is under way: never compete with it
+        } else {
+          m_statusDueUs = 0;
+          m_nextPollUs = now + POLL_US;
+          const bool gaveWay = readStatus(m_lastBatteryUs == 0 || now - m_lastBatteryUs > BATTERY_REFRESH_US);
+          // Close at once - unless a tap or command interrupted it: keep the
+          // session for the unlock that is about to arrive.
+          lingerUntilUs = esp_timer_get_time() + (gaveWay ? int64_t(LINGER_MS) * 1000 : 0);
+          if (gaveWay) m_statusDueUs = esp_timer_get_time() + CONFIRM_DELAY_US;
+          continue;
+        }
+      }
+      int64_t next = m_nextPollUs;
+      if (m_statusDueUs && m_statusDueUs < next) next = m_statusDueUs;
+      if (LISTEN && m_nextBurstUs < next) next = m_nextBurstUs;
+      const int64_t remainMs = (next - esp_timer_get_time()) / 1000;
+      wait = pdMS_TO_TICKS(remainMs > 0 ? remainMs : 1);
     }
     if (xQueueReceive(m_events, &ev, wait) != pdTRUE) {
       continue;  // linger expired; loop disconnects
@@ -543,10 +686,173 @@ void YaleBleLock::run() {
         g_bleRadioBusy.store(false, std::memory_order_release);
         ESP_LOGI(TAG, "lock disconnected (reason 0x%x)", ev.status);
         break;
+      case EvType::DiscDone:
+        m_listening.store(false, std::memory_order_relaxed);
+        break;
+      case EvType::Advert:
+        onAdvert(ev);
+        break;
+      case EvType::Hint:
+        handleHint(ev.frame[0], ev.frame[1]);
+        break;
       default:
         break;
     }
   }
+}
+
+// One listen burst per LISTEN_PERIOD_MS, skipped while anything else needs the
+// radio: the lock link, or doorbell card traffic in the last RELAY_QUIET_US.
+void YaleBleLock::listenTick() {
+  const int64_t now = esp_timer_get_time();
+  if (now - m_listenStatsUs >= 60000000) {
+    if (m_listenStatsUs)
+      ESP_LOGI(TAG, "listen: %lu bursts (%lu skipped) in the last minute, %lu lock advertisements heard",
+               (unsigned long)m_bursts, (unsigned long)m_burstsSkipped,
+               (unsigned long)m_lockAdverts.exchange(0));
+    m_bursts = m_burstsSkipped = 0;
+    m_listenStatsUs = now;
+  }
+  if (now < m_nextBurstUs) return;
+  m_nextBurstUs = now + int64_t(LISTEN_PERIOD_MS) * 1000;
+  if (m_conn != 0xFFFF || g_bleRadioBusy.load() || ble_gap_disc_active() ||
+      now - g_relayActivityUs.load() < RELAY_QUIET_US) {
+    ++m_burstsSkipped;
+    return;
+  }
+  ble_gap_disc_params dp{};
+  dp.filter_duplicates = 0;  // repeats are how a change shows up
+  dp.passive = 1;            // no scan requests: the lock is not disturbed
+  dp.itvl = LISTEN_WINDOW_MS * 1000 / 625;
+  dp.window = LISTEN_WINDOW_MS * 1000 / 625;
+  m_listening.store(true, std::memory_order_relaxed);
+  if (ble_gap_disc(m_ownAddrType, LISTEN_WINDOW_MS, &dp, gapEvent, this) == 0) {
+    ++m_bursts;
+  } else {
+    m_listening.store(false, std::memory_order_relaxed);
+  }
+}
+
+void YaleBleLock::onAdvert(const Ev &ev) {
+  switch (ev.addrType) {
+    case ADV_YALE:
+      ESP_LOGI(TAG, "lock advertisement: Yale flag %u (rssi %d)", ev.frame[0], ev.status);
+      break;
+    case ADV_HAP_GSN:
+      ESP_LOGI(TAG, "lock advertisement: HomeKit state number %u (rssi %d)",
+               unsigned(ev.frame[0] | ev.frame[1] << 8), ev.status);
+      break;
+    case ADV_HAP_ENCRYPTED:
+      ESP_LOGI(TAG, "lock advertisement: HomeKit encrypted notification (rssi %d)", ev.status);
+      break;
+  }
+  const int64_t now = esp_timer_get_time();
+  int64_t due = now + ADVERT_COALESCE_US;
+  if (m_lastOwnOpUs && due < m_lastOwnOpUs + OWN_OP_SETTLE_US) due = m_lastOwnOpUs + OWN_OP_SETTLE_US;
+  if (!m_statusDueUs || due < m_statusDueUs) m_statusDueUs = due;
+}
+
+// Lock, door and (when due) battery, as yalexs-ble's update does. Returns true
+// if it stopped early because a tap or a command needed the link.
+bool YaleBleLock::readStatus(bool withBattery) {
+  const int64_t t0 = esp_timer_get_time();
+  g_bleAbort.store(false);
+  g_bleBackgroundRead.store(true);
+  g_bleRadioBusy.store(true, std::memory_order_release);
+  m_abortable = true;
+  struct Guard {
+    YaleBleLock *self;
+    ~Guard() {
+      self->m_abortable = false;
+      g_bleBackgroundRead.store(false);
+      g_bleRadioBusy.store(false, std::memory_order_release);
+    }
+  } guard{this};
+  auto gaveWay = [&]() {
+    if (!g_bleAbort.load()) return false;
+    ESP_LOGI(TAG, "status read gave way to a tap or command after %lld ms", (esp_timer_get_time() - t0) / 1000);
+    return true;
+  };
+  if (!ensureConnected()) {
+    if (gaveWay()) return true;
+    ESP_LOGW(TAG, "status read: could not reach the lock");
+    return false;
+  }
+  Frame r{};
+  // handleCommandFrame() records each answer as it arrives.
+  sendCommand(OP_GETSTATUS, STATUS_LOCK_ONLY, 0xBB, OP_GETSTATUS, STATUS_LOCK_ONLY, GATT_MS, r);
+  if (gaveWay()) return true;
+  sendCommand(OP_GETSTATUS, STATUS_DOOR_ONLY, 0xBB, OP_GETSTATUS, STATUS_DOOR_ONLY, 2000, r);
+  if (gaveWay()) return true;
+  if (withBattery && sendCommand(OP_GETSTATUS, STATUS_BATTERY, 0xBB, OP_GETSTATUS, STATUS_BATTERY, 2000, r))
+    m_lastBatteryUs = esp_timer_get_time();
+  if (gaveWay()) return true;
+  ESP_LOGI(TAG, "status read in %lld ms: lock %s, door %s, battery %u mV",
+           (esp_timer_get_time() - t0) / 1000, m_lockStatus == 0xFF ? "?" : lockStatusName(m_lockStatus),
+           m_doorStatus == 0xFF ? "?" : doorStatusName(m_doorStatus), unsigned(m_batteryMv));
+  reportStatus(YALE_SRC_READ);
+  return false;
+}
+
+// A hint from the Yale cloud (via Home Assistant). Applied at once - the cloud
+// sees manual changes within 1-2 s - and confirmed by a read shortly after. A
+// hint that only repeats what we already know (our own unlock, echoed by the
+// cloud) costs no read.
+void YaleBleLock::handleHint(uint8_t lock, uint8_t door) {
+  bool changed = false;
+  if (lock != 0xFF && lock != m_lockStatus) {
+    ESP_LOGI(TAG, "cloud hint: lock %s (was %s)", lockStatusName(lock),
+             m_lockStatus == 0xFF ? "unknown" : lockStatusName(m_lockStatus));
+    setLockStatus(lock, YALE_SRC_CLOUD);
+    changed = true;
+  }
+  if (door != 0xFF && door != m_doorStatus) {
+    ESP_LOGI(TAG, "cloud hint: door %s", doorStatusName(door));
+    setDoorStatus(door);
+    changed = true;
+  }
+  if (!changed) return;
+  reportStatus(YALE_SRC_CLOUD);
+  const int64_t due = esp_timer_get_time() + CONFIRM_DELAY_US;
+  if (!m_statusDueUs || m_statusDueUs < due) m_statusDueUs = due;  // let it settle; coalesce bursts
+}
+
+void YaleBleLock::setLockStatus(uint8_t v, uint8_t source) {
+  if (v == m_lockStatus) return;
+  m_lockStatus = v;
+  reportLock(source);
+}
+
+void YaleBleLock::setDoorStatus(uint8_t v) { m_doorStatus = v; }
+
+// The HomeKit tile and the MQTT lock entity both follow LockManager.
+void YaleBleLock::reportLock(uint8_t) {
+  EventLockState s{};
+  s.source = LockManager::INTERNAL;
+  switch (m_lockStatus) {
+    case YALE_UNLOCKED: s.currentState = s.targetState = LockManager::UNLOCKED; break;
+    case YALE_LOCKED:
+    case YALE_SECURE: s.currentState = s.targetState = LockManager::LOCKED; break;
+    case YALE_JAMMED: s.currentState = LockManager::JAMMED; s.targetState = LockManager::MAX; break;
+    // Moving: show "unlocking" / "locking" by setting only the target.
+    case YALE_UNLOCKING: s.currentState = LockManager::MAX; s.targetState = LockManager::UNLOCKED; break;
+    case YALE_LOCKING: s.currentState = LockManager::MAX; s.targetState = LockManager::LOCKED; break;
+    default: s.currentState = LockManager::UNKNOWN; s.targetState = LockManager::MAX; break;
+  }
+  std::array<uint8_t, sizeof(EventLockState)> d{};
+  size_t n = alpaca::serialize(s, d);
+  AppEventLoop::publish(LOCK_EVENT, LOCK_OVERRIDE_STATE, d.data(), n);
+}
+
+void YaleBleLock::reportStatus(uint8_t source) {
+  EventYaleStatus st{};
+  st.lock = m_lockStatus;
+  st.door = m_doorStatus;
+  st.batteryMv = m_batteryMv;
+  st.source = source;
+  std::array<uint8_t, 16> d{};
+  size_t n = alpaca::serialize(st, d);
+  AppEventLoop::publish(LOCK_EVENT, YALE_STATUS, d.data(), n);
 }
 
 void YaleBleLock::performCommand(Cmd cmd) {
@@ -558,6 +864,12 @@ void YaleBleLock::performCommand(Cmd cmd) {
   } busyGuard;
   if (!ensureConnected()) {
     ESP_LOGE(TAG, "%s failed: could not establish a session with the lock", cmdName(cmd));
+    if (cmd == Cmd::Unlock || cmd == Cmd::Lock) {
+      // Do not leave the tile on "unlocking": back to what we last knew, and
+      // read again soon.
+      if (m_lockStatus != 0xFF) reportLock(YALE_SRC_COMMAND);
+      m_statusDueUs = esp_timer_get_time() + AFTER_FAILURE_READ_US;
+    }
     return;
   }
   Frame resp{};
@@ -576,6 +888,7 @@ void YaleBleLock::performCommand(Cmd cmd) {
     case Cmd::Lock: {
       const bool unlock = cmd == Cmd::Unlock;
       const uint8_t op = unlock ? OP_UNLOCK : OP_LOCK;
+      m_lastOwnOpUs = esp_timer_get_time();
       // Return on the lock's ack (0xAA, tens of ms), not its result (0xBB,
       // ~1.8 s later when the motor stops). Nothing here depends on the
       // result - state is not tracked - but waiting for it held the shared
@@ -592,6 +905,8 @@ void YaleBleLock::performCommand(Cmd cmd) {
         }
       } else {
         ESP_LOGE(TAG, "%s: lock did not acknowledge the command", cmdName(cmd));
+        if (m_lockStatus != 0xFF) reportLock(YALE_SRC_COMMAND);
+        m_statusDueUs = esp_timer_get_time() + AFTER_FAILURE_READ_US;
       }
       break;
     }
@@ -600,6 +915,10 @@ void YaleBleLock::performCommand(Cmd cmd) {
 
 bool YaleBleLock::ensureConnected() {
   if (m_conn != 0xFFFF && m_sessionReady) return true;
+  if (m_listening.load() || ble_gap_disc_active()) {
+    ble_gap_disc_cancel();  // a listen burst must not delay the connect
+    m_listening.store(false);
+  }
   if (m_conn != 0xFFFF) disconnect();
   const int64_t t0 = esp_timer_get_time();
   const bool justDisconnected =
@@ -609,6 +928,7 @@ bool YaleBleLock::ensureConnected() {
   // there is no reason to scan here: just allow it more time.
   const bool tryDirect = m_addrKnown;
   bool connected = tryDirect && connectDirect(justDisconnected ? CONNECT_MS : DIRECT_CONNECT_MS);
+  if (!connected && m_abortable && g_bleAbort.load()) return false;  // gave way; not "out of range"
   if (!connected) {
     if (tryDirect) ++m_directFailures;
     const bool scanWorthIt = !m_addrKnown ||
@@ -649,7 +969,7 @@ bool YaleBleLock::ensureConnected() {
   // Order matters: secure notifications first, then the handshake, then the
   // command channel (as yalexs-ble does).
   if (!writeCccd(m_hSecReadCccd, m_secReadProps, "secure read")) { clearCache(); disconnect(); return false; }
-  if (!handshake()) { disconnect(); return false; }
+  if (!handshake()) { m_abortable = false; disconnect(); return false; }
   if (!writeCccd(m_hReadCccd, m_readProps, "command read")) { disconnect(); return false; }
   m_sessionReady = true;
   ESP_LOGI(TAG, "session ready in %lld ms", (esp_timer_get_time() - t0) / 1000);
@@ -876,7 +1196,8 @@ bool YaleBleLock::sendCommand(uint8_t opcode, uint8_t subtype, uint8_t expectFla
     int64_t remainMs = (deadline - esp_timer_get_time()) / 1000;
     Ev ev{};
     if (remainMs <= 0 || !waitFor(EvType::NotifyCmd, uint32_t(remainMs), ev)) {
-      ESP_LOGE(TAG, "timed out waiting for response to opcode 0x%02X", opcode);
+      if (m_abortable && g_bleAbort.load()) return false;  // the answer is handled when it arrives
+      ESP_LOGE(TAG, "timed out waiting for response to opcode 0x%02X sub 0x%02X", opcode, subtype);
       return false;
     }
     Frame f = ev.frame;
@@ -896,18 +1217,38 @@ bool YaleBleLock::sendCommand(uint8_t opcode, uint8_t subtype, uint8_t expectFla
 }
 
 void YaleBleLock::handleCommandFrame(const Frame &f) {
-  // State is not tracked (see class comment); frames are only logged.
-  if (f[0] == 0xBB && f[1] == OP_GETSTATUS && (f[4] == STATUS_LOCK_ONLY || f[4] == STATUS_DOOR_AND_LOCK)) {
-    ESP_LOGI(TAG, "lock status 0x%02X", f[8]);
+  if (f[0] == 0xBB && f[1] == OP_GETSTATUS) {
+    if (f[4] == STATUS_LOCK_ONLY || f[4] == STATUS_DOOR_AND_LOCK) {
+      ESP_LOGD(TAG, "lock status 0x%02X (%s)", f[8], lockStatusName(f[8]));
+      setLockStatus(f[8], YALE_SRC_READ);
+      if (f[4] == STATUS_DOOR_AND_LOCK) setDoorStatus(f[9]);
+    } else if (f[4] == STATUS_DOOR_ONLY) {
+      setDoorStatus(f[8]);
+    } else if (f[4] == STATUS_BATTERY) {
+      const uint16_t mv = uint16_t(f[8] | f[9] << 8);
+      if (mv > 3000) m_batteryMv = mv;  // yalexs-ble discards <= 3.0 V as a bad reading
+    }
   } else if (f[0] == 0xBB && (f[1] == OP_UNLOCK || f[1] == OP_LOCK)) {
-    if (f[0x0F] == 0x00) ESP_LOGI(TAG, "lock reports %s done", f[1] == OP_UNLOCK ? "unlock" : "lock");
-    else ESP_LOGE(TAG, "lock reports %s failed: error 0x%02X", f[1] == OP_UNLOCK ? "unlock" : "lock", f[0x0F]);
+    // The result, when the motor stops (~1.8 s after the ack).
+    const bool unlock = f[1] == OP_UNLOCK;
+    if (f[0x0F] == 0x00) {
+      ESP_LOGI(TAG, "lock reports %s done", unlock ? "unlock" : "lock");
+      setLockStatus(unlock ? YALE_UNLOCKED : YALE_LOCKED, YALE_SRC_COMMAND);
+    } else {
+      ESP_LOGE(TAG, "lock reports %s failed: error 0x%02X", unlock ? "unlock" : "lock", f[0x0F]);
+      setLockStatus(YALE_JAMMED, YALE_SRC_COMMAND);  // as yalexs-ble does
+    }
+    reportStatus(YALE_SRC_COMMAND);
+  } else if (f[0] == 0xAA && (f[1] == OP_UNLOCK || f[1] == OP_LOCK)) {
+    // The ack: the motor is moving.
+    setLockStatus(f[1] == OP_UNLOCK ? YALE_UNLOCKING : YALE_LOCKING, YALE_SRC_COMMAND);
   } else {
     ESP_LOGD(TAG, "frame %02X %02X sub %02X result %02X", f[0], f[1], f[4], f[0x0F]);
   }
 }
 
 void YaleBleLock::disconnect() {
+  m_abortable = false;
   m_sessionReady = false;
   if (m_conn == 0xFFFF) return;
   ble_gap_terminate(m_conn, BLE_ERR_REM_USER_CONN_TERM);

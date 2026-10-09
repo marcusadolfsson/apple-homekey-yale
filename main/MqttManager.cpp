@@ -71,6 +71,38 @@ void MqttManager::end() {
  * @param deviceID Unique device identifier used for MQTT client identification and discovery topics.
  * @return true if the MQTT client was started successfully, false otherwise.
  */
+namespace {
+// Yale lock / door codes (yalexs-ble LockStatus, DoorStatus) as MQTT words.
+const char *yaleLockWord(uint8_t v) {
+  switch (v) {
+    case 0x02: return "unlocking";
+    case 0x03: return "unlocked";
+    case 0x04: return "locking";
+    case 0x05: return "locked";
+    case 0x07: return "jammed";
+    case 0x0C: return "locked";  // secure mode (deadlocked)
+    case 0x01: return "calibrating";
+  }
+  return "unknown";
+}
+const char *yaleDoorWord(uint8_t v) {
+  switch (v) {
+    case 0x01: return "closed";
+    case 0x02: return "ajar";
+    case 0x03: return "open";
+  }
+  return "unknown";
+}
+const char *yaleSourceWord(uint8_t v) {
+  switch (v) {
+    case YALE_SRC_READ: return "read";
+    case YALE_SRC_COMMAND: return "command";
+    case YALE_SRC_CLOUD: return "cloud";
+  }
+  return "?";
+}
+}  // namespace
+
 bool MqttManager::begin(std::string deviceID) {
     if (m_mqttConfig.mqttBroker.empty() || m_mqttConfig.mqttBroker == "0.0.0.0") {
         ESP_LOGW(TAG, "MQTT broker host is not configured. MQTT client will not start.");
@@ -94,6 +126,24 @@ bool MqttManager::begin(std::string deviceID) {
       // The doorbell board has no WiFi of its own: it sends one small radio frame
       // and this mains-powered base does the MQTT publish.
       publish(m_mqttConfig.doorbellTopic, "PRESS");
+    });
+    m_yale_status = AppEventLoop::subscribe(LOCK_EVENT, YALE_STATUS, [&](const uint8_t* data, size_t size){
+      if (size == 0 || data == nullptr) return;
+      std::span<const uint8_t> payload(data, size);
+      std::error_code ec;
+      EventYaleStatus st = alpaca::deserialize<EventYaleStatus>(payload, ec);
+      if (ec) return;
+      JsonBuilder j = JsonBuilder::object();
+      if (!j) return;
+      j.addString("lock", yaleLockWord(st.lock));
+      j.addString("door", yaleDoorWord(st.door));
+      if (st.batteryMv) j.addNumber("battery_mv", st.batteryMv);
+      j.addString("source", yaleSourceWord(st.source));
+      publish(yaleTopic("status"), j.toStringUnformatted(), 0, true);
+      // Only what the base read from the lock itself, not retained: with
+      // force_update + expire_after in HA this both timestamps every read and
+      // turns "unavailable" if the base stops reading.
+      if (st.source == YALE_SRC_READ) publish(yaleTopic("read"), yaleLockWord(st.lock), 0, false);
     });
     m_doorbell_battery = AppEventLoop::subscribe(HW_EVENT, HW_DOORBELL_BATTERY, [&](const uint8_t* data, size_t size){
       if (size == 0 || data == nullptr) return;
@@ -352,6 +402,8 @@ void MqttManager::onConnected() {
     if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to lockTStateCmd");
     ret = esp_mqtt_client_subscribe(m_client, m_mqttConfig.btrLvlCmdTopic.c_str(), 0);
     if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to btrLvlCmdTopic");
+    ret = esp_mqtt_client_subscribe(m_client, yaleTopic("hint").c_str(), 0);
+    if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to the Yale hint topic");
     if (m_mqttConfig.lockEnableCustomState) {
         ret = esp_mqtt_client_subscribe(m_client, m_mqttConfig.lockCustomStateCmd.c_str(), 0);
         if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to lockCustomStateCmd");
@@ -384,6 +436,21 @@ void MqttManager::onData(const std::string& topic, const std::string& data) {
     .source = LockManager::MQTT
     };
     std::array<uint8_t, sizeof(EventLockState)> d{};
+    if (topic == yaleTopic("hint")) {
+      // Yale cloud state forwarded by Home Assistant: a hint, confirmed by a BLE read.
+      EventYaleStatus h{};
+      h.source = YALE_SRC_CLOUD;
+      if (data == "locked") h.lock = 0x05;
+      else if (data == "unlocked") h.lock = 0x03;
+      else if (data == "jammed") h.lock = 0x07;
+      else if (data == "door_open") h.door = 0x03;
+      else if (data == "door_closed") h.door = 0x01;
+      else { ESP_LOGW(TAG, "Unknown Yale hint '%s'", data.c_str()); return; }
+      std::array<uint8_t, 16> hd{};
+      size_t n = alpaca::serialize(h, hd);
+      AppEventLoop::publish(LOCK_EVENT, YALE_HINT, hd.data(), n);
+      return;
+    }
     if (topic == m_mqttConfig.lockStateCmd) {
       uint8_t v; if (!to_u8(data, v)) { ESP_LOGW(TAG, "Invalid lockStateCmd payload: %s", data.c_str()); return; }
       s.currentState = v;
@@ -593,6 +660,31 @@ void MqttManager::publishHassDiscovery() {
         p.addString("state_unlocking", unlockingStr.c_str());
         p.addString("state_jammed", jammedStr.c_str());
         p.addString("availability_topic", m_mqttConfig.lwtTopic.c_str());
+    });
+
+    // The Yale lock's own readings (door, battery, last read), when it is driven over BLE.
+    publishConfig("Front door", "binary_sensor/" + m_mqttConfig.mqttClientId + "/yale_door/config", [&](JsonBuilder& p) {
+        p.addString("unique_id", (deviceID + "_yale_door").c_str());
+        p.addString("state_topic", yaleTopic("status").c_str());
+        p.addString("value_template", "{{ 'ON' if value_json.door in ['open', 'ajar'] else 'OFF' }}");
+        p.addString("device_class", "door");
+        p.addString("availability_topic", m_mqttConfig.lwtTopic.c_str());
+    });
+    publishConfig("Lock battery", "sensor/" + m_mqttConfig.mqttClientId + "/yale_battery/config", [&](JsonBuilder& p) {
+        p.addString("unique_id", (deviceID + "_yale_battery").c_str());
+        p.addString("state_topic", yaleTopic("status").c_str());
+        p.addString("value_template", "{{ (value_json.battery_mv / 1000) | round(2) if value_json.battery_mv is defined else none }}");
+        p.addString("device_class", "voltage");
+        p.addString("unit_of_measurement", "V");
+        p.addString("state_class", "measurement");
+        p.addString("availability_topic", m_mqttConfig.lwtTopic.c_str());
+    });
+    publishConfig("Lock read by base", "sensor/" + m_mqttConfig.mqttClientId + "/yale_read/config", [&](JsonBuilder& p) {
+        p.addString("unique_id", (deviceID + "_yale_read").c_str());
+        p.addString("state_topic", yaleTopic("read").c_str());
+        p.addBool("force_update", true);
+        p.addNumber("expire_after", 900);  // 3 polls missed: the base has stopped reading the lock
+        p.addString("icon", "mdi:lock-check");
     });
 
     // Publish the doorbell button as a momentary binary sensor

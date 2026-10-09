@@ -23,3 +23,14 @@ config XIAO_ESP32C6_EXTERNAL_ANTENNA
     depends on XIAO_ESP32C6_RF_SWITCH
     default n
 endmenu
+
+menu "Yale BLE lock"
+config YALE_BLE_LISTEN
+    bool "Listen for the lock's advertisements and read its state on change (experimental)"
+    default n
+    help
+        Short passive scan bursts (about 5% of the time) for the lock's Yale and
+        HomeKit advertisements. A change triggers a status read (lock, door,
+        battery). Bursts never run during a tap or while the lock link is up.
+        Under test: one radio serves Wi-Fi, ESP-NOW and BLE.
+endmenu
