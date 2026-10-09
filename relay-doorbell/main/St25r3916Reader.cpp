@@ -44,6 +44,7 @@ constexpr uint8_t REG_AMPLITUDE_MEASURE_REF = 0x34;
 constexpr uint8_t REG_AMPLITUDE_MEASURE_AA_RESULT = 0x35;  // auto-averaged reference
 constexpr uint8_t REG_AMPLITUDE_MEASURE_RESULT = 0x36;
 constexpr uint8_t AM_AE = 0x01;          // auto-averaging enable
+constexpr uint8_t AM_AAM = 0x08;         // include measurements that trip the threshold (RFAL aaInclMeas)
 constexpr uint8_t AM_AEW_SHIFT = 1;      // auto-averaging weight, bits 2:1
 constexpr uint8_t REG_PHASE_MEASURE_CONF = 0x37;
 constexpr uint8_t REG_PHASE_MEASURE_REF = 0x38;
@@ -1116,7 +1117,8 @@ bool St25r3916Reader::startWakeUpMode(uint16_t periodMs, uint8_t amplitudeDelta,
     if (amplitudeDelta) {
         writeReg(REG_AMPLITUDE_MEASURE_REF, m_wuRef.amplitude);  // also seeds the running average
         writeReg(REG_AMPLITUDE_MEASURE_CONF,
-                 static_cast<uint8_t>(((amplitudeDelta & 0x0F) << 4) | (WU_AUTO_AVG_WEIGHT << AM_AEW_SHIFT) | AM_AE));
+                 static_cast<uint8_t>(((amplitudeDelta & 0x0F) << 4) | (WU_AUTO_AVG_WEIGHT << AM_AEW_SHIFT) |
+                                      AM_AE | AM_AAM));
     }
     if (phaseDelta) {
         writeReg(REG_PHASE_MEASURE_REF, m_wuRef.phase);
