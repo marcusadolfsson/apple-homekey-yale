@@ -422,26 +422,44 @@ void RemoteNfcReader::noteBattery(const uint8_t *tail, size_t len) {
   }
 }
 
-// 'S', 1, up s, awake ms, wakes, reader wakes, false wakes, button wakes, timer
-// wakes, cards, search ms (see appendStats() in relay-doorbell), then battery.
+// 'S', version, up s, awake ms, wakes, reader wakes, false wakes, button wakes,
+// timer wakes, cards, search ms; v2 adds the wake-up threshold and the last
+// false wake-ups (reading, running average). See appendStats() in relay-doorbell.
 void RemoteNfcReader::noteStats(const uint8_t *p, size_t len) {
-  if (len < 28 || p[0] != 'S' || p[1] != 1) return;  // older doorbell firmware
+  if (len < 28 || p[0] != 'S' || (p[1] != 1 && p[1] != 2)) return;  // older doorbell firmware
   auto u16 = [&](size_t o) { return unsigned(p[o] | p[o + 1] << 8); };
   auto u32 = [&](size_t o) { return unsigned(p[o] | p[o + 1] << 8 | p[o + 2] << 16 | unsigned(p[o + 3]) << 24); };
   const unsigned upS = u32(2), awakeMs = u32(6), searchMs = u32(22);
   const unsigned wakes = u16(10), nfc = u16(12), falseW = u16(14), button = u16(16), timer = u16(18), cards = u16(20);
   const double awakePct = upS ? awakeMs / 10.0 / upS : 0;
-  char json[240];
+  int threshold = -1;
+  std::string falseLog = "[]";
+  if (p[1] == 2 && len >= 28 + 2) {
+    threshold = p[26];
+    const unsigned n = p[27];
+    if (len >= 28 + 2 * n + 2 && n <= 4) {
+      falseLog = "[";
+      for (unsigned i = 0; i < n; ++i) {
+        char pair[16];
+        snprintf(pair, sizeof(pair), "%s[%u,%u]", i ? "," : "", p[28 + 2 * i], p[29 + 2 * i]);
+        falseLog += pair;
+      }
+      falseLog += "]";
+    }
+  }
+  char json[320];
   snprintf(json, sizeof(json),
            "{\"up_s\":%u,\"awake_ms\":%u,\"awake_pct\":%.3f,\"wakes\":%u,\"reader_wakes\":%u,"
-           "\"false_wakes\":%u,\"button_wakes\":%u,\"timer_wakes\":%u,\"cards\":%u,\"search_ms\":%u}",
-           upS, awakeMs, awakePct, wakes, nfc, falseW, button, timer, cards, searchMs);
+           "\"false_wakes\":%u,\"button_wakes\":%u,\"timer_wakes\":%u,\"cards\":%u,\"search_ms\":%u,"
+           "\"threshold\":%d,\"false_log\":%s}",
+           upS, awakeMs, awakePct, wakes, nfc, falseW, button, timer, cards, searchMs, threshold, falseLog.c_str());
   const int64_t now = esp_timer_get_time();
   if (now - m_lastStatsLogUs > 600000000LL || !m_lastStatsLogUs) {  // awake on USB it reports every 30 s
     m_lastStatsLogUs = now;
     ESP_LOGI(TAG, "doorbell since power-up: %u s, awake %u s (%.2f %%), %u wakes (%u reader of which %u false, "
-                  "%u button, %u timer), %u cards, %u s searching",
-             upS, awakeMs / 1000, awakePct, wakes, nfc, falseW, button, timer, cards, searchMs / 1000);
+                  "%u button, %u timer), %u cards, %u s searching; threshold %d, last false (reading,avg) %s",
+             upS, awakeMs / 1000, awakePct, wakes, nfc, falseW, button, timer, cards, searchMs / 1000, threshold,
+             falseLog.c_str());
   }
   EventValueChanged ev{};
   ev.name = "doorbellStats";

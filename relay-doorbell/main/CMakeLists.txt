@@ -8,3 +8,8 @@ idf_component_register(SRCS "main.cpp" "Pn532I2cTransport.cpp" "RelayProtocol.cp
 if(DOORBELL_SLEEP_ON_USB)
   target_compile_definitions(${COMPONENT_LIB} PRIVATE DOORBELL_SLEEP_ON_USB=1)
 endif()
+# Diagnostic build that reports every N seconds on battery:
+#   idf.py -B build-diag -DDOORBELL_HEARTBEAT_SLEEP_S=120 build
+if(DOORBELL_HEARTBEAT_SLEEP_S)
+  target_compile_definitions(${COMPONENT_LIB} PRIVATE DOORBELL_HEARTBEAT_SLEEP_S=${DOORBELL_HEARTBEAT_SLEEP_S})
+endif()

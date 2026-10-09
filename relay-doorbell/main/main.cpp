@@ -77,7 +77,13 @@ constexpr int64_t BASE_SILENCE_US = HEARTBEAT_US * 3 / 2;
 #ifndef DOORBELL_SLEEP_ON_USB
 #define DOORBELL_SLEEP_ON_USB 0
 #endif
+// DOORBELL_HEARTBEAT_SLEEP_S: a diagnostic build reports every few minutes on
+// battery (idf.py -B build-diag -DDOORBELL_HEARTBEAT_SLEEP_S=120 build).
+#ifdef DOORBELL_HEARTBEAT_SLEEP_S
+constexpr int64_t HEARTBEAT_SLEEP_US = int64_t(DOORBELL_HEARTBEAT_SLEEP_S) * 1000000;
+#else
 constexpr int64_t HEARTBEAT_SLEEP_US = DOORBELL_SLEEP_ON_USB ? 120000000LL : 3600000000LL;
+#endif
 constexpr int64_t COLD_BOOT_AWAKE_US = 20000000;  // time to flash or attach after a reset
 // After a wake, stay up at least this long. Bench tests need ~3 s for macOS to
 // re-enumerate the USB console, or nothing the wake did gets logged.
@@ -132,9 +138,14 @@ struct RtcState {
   uint32_t awakeMs;     // time spent awake, summed over every wake
   uint32_t falseWakes;  // reader woke us but no card came
   uint32_t searchMs;    // time spent searching channels for the base
+  uint8_t lpcdDelta;    // current (adaptive) wake-up threshold
+  uint8_t falseInWindow;
+  int64_t falseWindowUs, lastFalseUs, lastDeltaChangeUs;
+  uint8_t falseLog[4][2];  // last false wake-ups: reading, running average
+  uint8_t falseLogN;       // total recorded (index = n % 4)
 };
 RTC_DATA_ATTR RtcState g_rtc;
-constexpr uint32_t RTC_MAGIC = 0xD00B5704;
+constexpr uint32_t RTC_MAGIC = 0xD00B5705;
 
 // Keeps counting through deep sleep, unlike esp_timer_get_time().
 int64_t rtcNowUs() {
@@ -208,7 +219,16 @@ int g_fieldClearPolls = 0;
 constexpr uint16_t LPCD_PERIOD_MS = 100;
 // In A/D steps. Wake-up-mode readings on the Click sit within ~2 steps of
 // each other at rest, so 2 (RFAL's default) fired on noise; 3 is the floor.
-constexpr uint8_t LPCD_AMPLITUDE_DELTA = 3;
+constexpr uint8_t LPCD_AMPLITUDE_DELTA = 3;  // the floor; see the adaptive threshold
+// Adaptive threshold: on battery the readings can jitter more than on USB
+// power (10-09: 7172 false wake-ups in 6 h on battery, 1 overnight on a
+// charger). FALSE_WAKES_TO_RAISE false wake-ups within FALSE_WAKE_WINDOW_US
+// raise it by one step (up to LPCD_DELTA_MAX); an hour without one lowers it
+// by one. A phone moves the reading by ~18-26 steps, so taps survive.
+constexpr uint8_t LPCD_DELTA_MAX = 10;
+constexpr int FALSE_WAKES_TO_RAISE = 3;
+constexpr int64_t FALSE_WAKE_WINDOW_US = 60000000;
+constexpr int64_t QUIET_TO_LOWER_US = 3600000000LL;
 // Phase is off: on the Click it reads 0 in every mode, so it can never move.
 // RFAL's default wake-up configuration is amplitude-only too.
 constexpr uint8_t LPCD_PHASE_DELTA = 0;
@@ -228,6 +248,7 @@ int64_t g_fieldClearSinceUs = 0; // when g_awaitFieldClear was set
 // includes the phone, and lifting it off is the next wake-up.
 constexpr int64_t FIELD_CLEAR_GIVE_UP_US = 10000000;
 int g_lpcdWakes = 0, g_lpcdWakesWithCard = 0, g_lpcdFalseWakes = 0;
+uint8_t g_lastWakeAmp = 0, g_lastWakeRef = 0;  // readings of the current wake-up
 int64_t g_lpcdStatsUs = 0;
 int64_t g_lpcdLastWarnUs = 0;
 // TX driver resistance used in wake-up mode, picked by a sweep on first arm:
@@ -379,8 +400,9 @@ void batteryInit() {
 uint16_t g_batteryMv = 0;
 // Where the battery goes, since power-up, ahead of the battery bytes (the base
 // reads the battery from the last two bytes, so older bases still work):
-// 'S', version 1, up s (u32), awake ms (u32), wakes, reader wakes, false wakes,
-// button wakes, timer wakes, cards (u16 each), search ms (u32); little-endian.
+// 'S', version 2, up s (u32), awake ms (u32), wakes, reader wakes, false wakes,
+// button wakes, timer wakes, cards (u16 each), search ms (u32); then (v2) the
+// wake-up threshold, a count n and n reading/average pairs; little-endian.
 void appendStats(std::vector<uint8_t> &out) {
   auto u16 = [&](uint32_t v) {
     const uint16_t x = v > 0xFFFF ? 0xFFFF : uint16_t(v);
@@ -388,12 +410,22 @@ void appendStats(std::vector<uint8_t> &out) {
   };
   auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) out.push_back(uint8_t(v >> (8 * i))); };
   out.push_back('S');
-  out.push_back(1);
+  out.push_back(2);
   u32(uint32_t((rtcNowUs() - g_rtc.powerOnUs) / 1000000));
   u32(g_rtc.awakeMs + uint32_t(esp_timer_get_time() / 1000));  // including this wake so far
   u16(g_rtc.wakes); u16(g_rtc.nfcWakes); u16(g_rtc.falseWakes);
   u16(g_rtc.buttonWakes); u16(g_rtc.timerWakes); u16(g_rtc.taps);
   u32(g_rtc.searchMs);
+  // v2: wake-up threshold, false wake-ups recorded, then the last (up to) 4 as
+  // reading/average pairs, newest first.
+  out.push_back(g_rtc.lpcdDelta);
+  const uint8_t n = g_rtc.falseLogN > 4 ? 4 : g_rtc.falseLogN;
+  out.push_back(n);
+  for (int i = 0; i < n; ++i) {
+    const int idx = (g_rtc.falseLogN - 1 - i) % 4;
+    out.push_back(g_rtc.falseLog[idx][0]);
+    out.push_back(g_rtc.falseLog[idx][1]);
+  }
 }
 
 void appendBattery(std::vector<uint8_t> &out, bool fresh) {
@@ -597,7 +629,8 @@ void lpcdArm() {
     }
   }
   const int64_t now = esp_timer_get_time();
-  if (!g_st->startWakeUpMode(LPCD_PERIOD_MS, LPCD_AMPLITUDE_DELTA, LPCD_PHASE_DELTA, g_lpcdDres)) {
+  if (g_rtc.lpcdDelta < LPCD_AMPLITUDE_DELTA || g_rtc.lpcdDelta > LPCD_DELTA_MAX) g_rtc.lpcdDelta = LPCD_AMPLITUDE_DELTA;
+  if (!g_st->startWakeUpMode(LPCD_PERIOD_MS, g_rtc.lpcdDelta, LPCD_PHASE_DELTA, g_lpcdDres)) {
     ESP_LOGE(TAG, "could not enter wake-up mode; polling instead, retry in 5 s");
     g_lpcdActiveUntilUs = now + 5000000;
     return;
@@ -649,6 +682,22 @@ bool lpcdGate() {
     if (g_lpcdWakePending) {
       ++g_lpcdFalseWakes;
       ++g_rtc.falseWakes;
+      g_rtc.falseLog[g_rtc.falseLogN % 4][0] = g_lastWakeAmp;
+      g_rtc.falseLog[g_rtc.falseLogN % 4][1] = g_lastWakeRef;
+      ++g_rtc.falseLogN;
+      const int64_t t = rtcNowUs();
+      g_rtc.lastFalseUs = t;
+      if (t - g_rtc.falseWindowUs > FALSE_WAKE_WINDOW_US) {
+        g_rtc.falseWindowUs = t;
+        g_rtc.falseInWindow = 0;
+      }
+      if (++g_rtc.falseInWindow >= FALSE_WAKES_TO_RAISE && g_rtc.lpcdDelta < LPCD_DELTA_MAX) {
+        ++g_rtc.lpcdDelta;
+        g_rtc.falseInWindow = 0;
+        g_rtc.falseWindowUs = t;
+        g_rtc.lastDeltaChangeUs = t;
+        ESP_LOGW(TAG, "false wake-ups keep coming; wake-up threshold raised to %u", g_rtc.lpcdDelta);
+      }
       g_lpcdWakePending = false;
       ESP_LOGI(TAG, "wake-up was a false alarm: no card within %lld ms", LPCD_ACTIVE_US / 1000);
     }
@@ -687,6 +736,8 @@ bool lpcdGate() {
   g_lpcdWakeUs = now;
   g_lpcdActiveUntilUs = now + LPCD_ACTIVE_US;
   const auto &ref = g_st->wakeUpReference();
+  g_lastWakeAmp = seen.amplitude;
+  g_lastWakeRef = ref.amplitude;
   ESP_LOGI(TAG, "wake-up (%s%s) after %lld ms: amplitude %u (ref %u), phase %u (ref %u)",
            (ev & St25r3916Reader::WAKE_AMPLITUDE) ? "amplitude" : "",
            (ev & St25r3916Reader::WAKE_PHASE) ? ((ev & St25r3916Reader::WAKE_AMPLITUDE) ? "+phase" : "phase") : "",
@@ -805,6 +856,18 @@ void maybeDeepSleep() {
   if (gpio_get_level(PIN_BUTTON) == 0 || gpio_get_level(PIN_NFC_IRQ) != 0) return;
   if (!g_hbAcked && now < g_hbAckDeadlineUs) return;
   if (now - g_lastTxUs < TX_DRAIN_US) return;
+  {
+    const int64_t t = rtcNowUs();
+    if (g_rtc.lpcdDelta > LPCD_AMPLITUDE_DELTA && t - g_rtc.lastFalseUs > QUIET_TO_LOWER_US &&
+        t - g_rtc.lastDeltaChangeUs > QUIET_TO_LOWER_US) {
+      --g_rtc.lpcdDelta;
+      g_rtc.lastDeltaChangeUs = t;
+      ESP_LOGI(TAG, "an hour without false wake-ups; wake-up threshold lowered to %u", g_rtc.lpcdDelta);
+      g_st->stopWakeUpMode();
+      lpcdArm();
+      return;  // sleep on a later pass, once re-armed with the new threshold
+    }
+  }
   if (rtcNowUs() - g_rtc.lastArmUs > LPCD_REARM_SLEEP_US) {
     // Hours asleep: refresh the wake-up reference before the next stretch.
     g_st->stopWakeUpMode();
@@ -1112,6 +1175,7 @@ extern "C" void app_main() {
   } else {
     std::memset(&g_rtc, 0, sizeof(g_rtc));
     g_rtc.powerOnUs = rtcNowUs();
+    g_rtc.lpcdDelta = LPCD_AMPLITUDE_DELTA;
     g_stayAwakeUntilUs = COLD_BOOT_AWAKE_US;
   }
 
