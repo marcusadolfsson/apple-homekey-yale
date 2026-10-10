@@ -807,17 +807,23 @@ deliberately wrong cloud "unlocked" was corrected by the read 15 s later. Reads 
 
 ---
 
-## 10. Status (2026-10-09)
+## 10. Status (2026-10-10)
 
 - **Working end to end:** iPhone Home Key **Express** tap on the doorbell (phone
   locked, no Wallet) → encrypted, MAC-pinned ESP-NOW → base authenticates (~90 ms with
   the ST25R3916) → Yale unlocks over BLE.
 - **Doorbell:** production board on the reworked NFC 4 Click with ferrite, deep sleep
   with ST25R3916 wake-up, bounded base search with back-off, tap/button-triggered
-  re-search, battery divider fitted, stats v2 in heartbeats. Adaptive wake-up threshold
-  under test on battery.
+  re-search, battery divider fitted, stats v2 in heartbeats. Mounted outside on battery
+  (against a metal plate) since 10-10 12:20: relay link −61 dBm, 4/4 taps from cold
+  power-up worked with the longer settles; the adaptive threshold's false-wake rate in
+  place is still being watched in the hourly stats.
 - **Base:** sole BLE client of the lock; tracks lock, door and battery from reads, its
   own commands and the Yale cloud via HA; HomeKit lock + door contact sensor (+ optional
   battery); MQTT entities with HA discovery; dashboard shows pairing, link RSSI,
   reader-ready and doorbell battery. Both boards recover pairing on their own after
   either restarts or the AP changes channel.
+- **Lock connects slowly right after a door event:** 10-10 a tap 17 s after the door
+  closed waited 4.5 s for the BLE connect (usually 0.2–1.1 s), and a read just after the
+  next door event took 3.8 s — the lock seems busy reporting the event. Not the doorbell;
+  watch whether it recurs.
