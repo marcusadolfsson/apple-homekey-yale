@@ -61,13 +61,13 @@ def unused(x, y, anchor):
 
 lbox(ys[0], ORG, "Battery sense", "junction of R1, R2, C1 (divider below)")
 lbox(ys[1], PUR, "NFC 4 Click: IRQ", "wakes the doorbell when a phone arrives")
-lbox(ys[2], GRN, "Doorbell button", "other leg to GND; diagonal pins on a 4-pin switch")
+lbox(ys[2], BLU, "NFC 4 Click: SDA", "I2C data (no button on this board)")
 unused(bx-20, ys[3], "end")
 lbox(ys[4], BLU, "NFC 4 Click: SCL", "I2C clock")
-lbox(ys[5], BLU, "NFC 4 Click: SDA", "I2C data")
+unused(bx-20, ys[5], "end")
 unused(bx-20, ys[6], "end")
 unused(bx+bw+20, ys[0], "start")
-rbox(ys[1], BLK, "GND (shared)", "Click GND, button, R2 + C1: splice here")
+rbox(ys[1], BLK, "GND (shared)", "Click GND, R2 + C1: splice here")
 rbox(ys[2], RED, "NFC 4 Click: 3V3", "the Click runs from the XIAO's 3.3 V")
 for y in ys[3:]: unused(bx+bw+20, y, "start")
 

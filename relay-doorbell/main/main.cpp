@@ -45,14 +45,21 @@
 namespace {
 
 const char *TAG = "doorbell";
+// DOORBELL_BUTTON: a doorbell push-button on D2 (to GND). Off on the production
+// board (2026-10-10): the button does not fit the cavity without a custom PCB,
+// and the Click's SDA wire went to D2. With it on, SDA moves back to D5.
+#ifndef DOORBELL_BUTTON
+#define DOORBELL_BUTTON 0
+#endif
+constexpr bool HAS_BUTTON = DOORBELL_BUTTON;
 // Production doorbell wiring; any C6 pin can carry I2C. (The first bench
 // doorbell, MAC ..8C:DC, has SDA on D4 and SCL on D5.)
-constexpr gpio_num_t PIN_SDA = GPIO_NUM_23;  // XIAO D5
+constexpr gpio_num_t PIN_SDA = HAS_BUTTON ? GPIO_NUM_23 : GPIO_NUM_2;  // XIAO D5, or D2 without a button
 constexpr gpio_num_t PIN_SCL = GPIO_NUM_22;  // XIAO D4
 // Doorbell button: wire it between D2 and GND. GPIO0-7 are the C6's low-power
 // pins, so in a battery build this same pin wakes the chip from deep sleep
 // and a press costs one radio frame. (Not D0: that doubles as A0, where the
-// battery divider lands.)
+// battery divider lands.) Only used with DOORBELL_BUTTON.
 constexpr gpio_num_t PIN_BUTTON = GPIO_NUM_2;  // XIAO D2
 // ST25R3916 IRQ, push-pull from the chip. Also a low-power pin, so the same
 // wire is what wakes the C6 from deep sleep when a phone arrives.
@@ -343,7 +350,7 @@ void linkSecurityInit() {
 
   // The key is a pairing secret: show it when it is created, and afterwards
   // only on request (doorbell button held while powering on), not every boot.
-  if (generated || (!g_fromSleep && gpio_get_level(PIN_BUTTON) == 0)) {
+  if (generated || (HAS_BUTTON && !g_fromSleep && gpio_get_level(PIN_BUTTON) == 0)) {
     std::string hex;
     for (uint8_t b : key) { char t[3]; snprintf(t, sizeof(t), "%02x", b); hex += t; }
     ESP_LOGW(TAG, "relay link key: %s", hex.c_str());
@@ -516,7 +523,27 @@ void send(const uint8_t mac[6], relay::Op op, uint8_t seq, uint8_t flags,
 // "no response at 0x50"; on a freshly modified board (COMM SEL jumpers moved,
 // headers replaced by wires) the useful fact is what, if anything, is there.
 // Runs once at boot on its own short-lived bus, before the driver claims it.
+// Idle level of each I2C line: with no pull of our own it shows the Click's
+// pull-up (powered, connected) or a short/open; with ours it shows a short.
+void i2cLineReport() {
+  auto level = [](gpio_num_t pin, gpio_pull_mode_t pull) {
+    gpio_reset_pin(pin);
+    gpio_set_direction(pin, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(pin, pull);
+    vTaskDelay(pdMS_TO_TICKS(5));
+    return gpio_get_level(pin);
+  };
+  const int sdaFloat = level(PIN_SDA, GPIO_PULLDOWN_ONLY), sclFloat = level(PIN_SCL, GPIO_PULLDOWN_ONLY);
+  const int sdaUp = level(PIN_SDA, GPIO_PULLUP_ONLY), sclUp = level(PIN_SCL, GPIO_PULLUP_ONLY);
+  ESP_LOGI(TAG, "I2C lines: SDA (GPIO%d) %s, SCL (GPIO%d) %s against our pull-down; with our pull-up SDA %s, SCL %s", PIN_SDA,
+           sdaFloat ? "HIGH (Click pull-up present)" : "low", PIN_SCL, sclFloat ? "HIGH (Click pull-up present)" : "low",
+           sdaUp ? "high" : "LOW (shorted to GND?)", sclUp ? "high" : "LOW (shorted to GND?)");
+  gpio_reset_pin(PIN_SDA);
+  gpio_reset_pin(PIN_SCL);
+}
+
 void i2cBusReport(uint8_t expect) {
+  i2cLineReport();
   i2c_master_bus_config_t cfg{};
   cfg.i2c_port = -1;
   cfg.sda_io_num = PIN_SDA;
@@ -838,16 +865,18 @@ bool sleepAllowedNow() {
 // Wake on the reader's IRQ (high, when `nfc`) and the button (low). The pulls
 // are set on the low-power pads; the IDF holds them through the sleep.
 void armWakePins(bool nfc) {
-  rtc_gpio_init(PIN_BUTTON);
-  rtc_gpio_set_direction(PIN_BUTTON, RTC_GPIO_MODE_INPUT_ONLY);
-  rtc_gpio_pulldown_dis(PIN_BUTTON);
-  rtc_gpio_pullup_en(PIN_BUTTON);
+  if (HAS_BUTTON) {
+    rtc_gpio_init(PIN_BUTTON);
+    rtc_gpio_set_direction(PIN_BUTTON, RTC_GPIO_MODE_INPUT_ONLY);
+    rtc_gpio_pulldown_dis(PIN_BUTTON);
+    rtc_gpio_pullup_en(PIN_BUTTON);
+  }
   rtc_gpio_init(PIN_NFC_IRQ);
   rtc_gpio_set_direction(PIN_NFC_IRQ, RTC_GPIO_MODE_INPUT_ONLY);
   rtc_gpio_pullup_dis(PIN_NFC_IRQ);
   rtc_gpio_pulldown_en(PIN_NFC_IRQ);
   if (nfc) esp_sleep_enable_ext1_wakeup_io(1ULL << PIN_NFC_IRQ, ESP_EXT1_WAKEUP_ANY_HIGH);
-  esp_sleep_enable_ext1_wakeup_io(1ULL << PIN_BUTTON, ESP_EXT1_WAKEUP_ANY_LOW);
+  if (HAS_BUTTON) esp_sleep_enable_ext1_wakeup_io(1ULL << PIN_BUTTON, ESP_EXT1_WAKEUP_ANY_LOW);
 }
 
 void flushConsoleBeforeSleep() {
@@ -938,7 +967,7 @@ void maybeDeepSleep() {
   const int64_t now = esp_timer_get_time();
   if (!g_baseKnown || !g_haveEcp || !g_st->inWakeUpMode()) return;
   if (g_tagActive || g_awaitFieldClear || g_lpcdWakePending || now < g_lpcdActiveUntilUs) return;
-  if (gpio_get_level(PIN_BUTTON) == 0 || gpio_get_level(PIN_NFC_IRQ) != 0) return;
+  if ((HAS_BUTTON && gpio_get_level(PIN_BUTTON) == 0) || gpio_get_level(PIN_NFC_IRQ) != 0) return;
   if (!g_hbAcked && now < g_hbAckDeadlineUs) return;
   if (now - g_lastTxUs < TX_DRAIN_US) return;
   {
@@ -1060,6 +1089,7 @@ void sendButtonPress() {
 // Debounced press detection while awake. When asleep, the same pin wakes the
 // chip, and a button wake sends the press straight away (see app_main).
 void checkButton() {
+  if (!HAS_BUTTON) return;
   const int level = gpio_get_level(PIN_BUTTON);
   const int64_t now = esp_timer_get_time();
   if (level != g_buttonLast) {
@@ -1251,7 +1281,7 @@ extern "C" void app_main() {
   if (g_fromSleep) {
     ++g_rtc.wakes;
     g_wokeByNfc = ext1 & (1ULL << PIN_NFC_IRQ);
-    g_wokeByButton = ext1 & (1ULL << PIN_BUTTON);
+    g_wokeByButton = HAS_BUTTON && (ext1 & (1ULL << PIN_BUTTON));
     g_wokeByTimer = cause == ESP_SLEEP_WAKEUP_TIMER;
     if (g_wokeByNfc) ++g_rtc.nfcWakes;
     if (g_wokeByButton) ++g_rtc.buttonWakes;
@@ -1290,14 +1320,18 @@ extern "C" void app_main() {
   esp_wifi_get_mac(WIFI_IF_STA, mac);
   ESP_LOGI(TAG, "doorbell MAC %02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
-  gpio_config_t btn{};
-  btn.pin_bit_mask = 1ULL << PIN_BUTTON;
-  btn.mode = GPIO_MODE_INPUT;
-  btn.pull_up_en = GPIO_PULLUP_ENABLE;  // button shorts to GND when pressed
-  btn.pull_down_en = GPIO_PULLDOWN_DISABLE;
-  btn.intr_type = GPIO_INTR_DISABLE;
-  gpio_config(&btn);
-  ESP_LOGI(TAG, "doorbell button on GPIO%d (wire it to GND)", PIN_BUTTON);
+  if (HAS_BUTTON) {
+    gpio_config_t btn{};
+    btn.pin_bit_mask = 1ULL << PIN_BUTTON;
+    btn.mode = GPIO_MODE_INPUT;
+    btn.pull_up_en = GPIO_PULLUP_ENABLE;  // button shorts to GND when pressed
+    btn.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    btn.intr_type = GPIO_INTR_DISABLE;
+    gpio_config(&btn);
+    ESP_LOGI(TAG, "doorbell button on GPIO%d (wire it to GND)", PIN_BUTTON);
+  } else {
+    ESP_LOGI(TAG, "no doorbell button (DOORBELL_BUTTON off); Click SDA on D2");
+  }
   batteryInit();
   const uint16_t mv = g_batteryMv = readBatteryMv();
   if (mv) ESP_LOGI(TAG, "battery %u mV", mv);

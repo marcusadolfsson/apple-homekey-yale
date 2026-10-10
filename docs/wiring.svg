@@ -55,25 +55,22 @@
 <rect x="60" y="279" width="300" height="48" rx="6" fill="#fbefff" stroke="#8250df" stroke-width="1.5"/>
 <text x="72" y="299" font-size="14" text-anchor="start" font-weight="600" fill="#8250df">NFC 4 Click: IRQ</text>
 <text x="72" y="318" font-size="12" text-anchor="start" font-weight="400" fill="#424a53">wakes the doorbell when a phone arrives</text>
-<line x1="360" y1="361" x2="442" y2="361" stroke="#1a7f37" stroke-width="3" stroke-linecap="round"/>
-<rect x="60" y="337" width="300" height="48" rx="6" fill="#dafbe1" stroke="#1a7f37" stroke-width="1.5"/>
-<text x="72" y="357" font-size="14" text-anchor="start" font-weight="600" fill="#1a7f37">Doorbell button</text>
-<text x="72" y="376" font-size="12" text-anchor="start" font-weight="400" fill="#424a53">other leg to GND; diagonal pins on a 4-pin switch</text>
+<line x1="360" y1="361" x2="442" y2="361" stroke="#0969da" stroke-width="3" stroke-linecap="round"/>
+<rect x="60" y="337" width="300" height="48" rx="6" fill="#ddf4ff" stroke="#0969da" stroke-width="1.5"/>
+<text x="72" y="357" font-size="14" text-anchor="start" font-weight="600" fill="#0969da">NFC 4 Click: SDA</text>
+<text x="72" y="376" font-size="12" text-anchor="start" font-weight="400" fill="#424a53">I2C data (no button on this board)</text>
 <text x="430" y="424" font-size="12" text-anchor="end" font-weight="400" fill="#8c959f" font-style="italic">not used</text>
 <line x1="360" y1="477" x2="442" y2="477" stroke="#0969da" stroke-width="3" stroke-linecap="round"/>
 <rect x="60" y="453" width="300" height="48" rx="6" fill="#ddf4ff" stroke="#0969da" stroke-width="1.5"/>
 <text x="72" y="473" font-size="14" text-anchor="start" font-weight="600" fill="#0969da">NFC 4 Click: SCL</text>
 <text x="72" y="492" font-size="12" text-anchor="start" font-weight="400" fill="#424a53">I2C clock</text>
-<line x1="360" y1="535" x2="442" y2="535" stroke="#0969da" stroke-width="3" stroke-linecap="round"/>
-<rect x="60" y="511" width="300" height="48" rx="6" fill="#ddf4ff" stroke="#0969da" stroke-width="1.5"/>
-<text x="72" y="531" font-size="14" text-anchor="start" font-weight="600" fill="#0969da">NFC 4 Click: SDA</text>
-<text x="72" y="550" font-size="12" text-anchor="start" font-weight="400" fill="#424a53">I2C data</text>
+<text x="430" y="540" font-size="12" text-anchor="end" font-weight="400" fill="#8c959f" font-style="italic">not used</text>
 <text x="430" y="598" font-size="12" text-anchor="end" font-weight="400" fill="#8c959f" font-style="italic">not used</text>
 <text x="670" y="250" font-size="12" text-anchor="start" font-weight="400" fill="#8c959f" font-style="italic">not used</text>
 <line x1="658" y1="303" x2="730" y2="303" stroke="#1f2328" stroke-width="3" stroke-linecap="round"/>
 <rect x="730" y="279" width="330" height="48" rx="6" fill="#f6f8fa" stroke="#1f2328" stroke-width="1.5"/>
 <text x="742" y="299" font-size="14" text-anchor="start" font-weight="600" fill="#1f2328">GND (shared)</text>
-<text x="742" y="318" font-size="12" text-anchor="start" font-weight="400" fill="#424a53">Click GND, button, R2 + C1: splice here</text>
+<text x="742" y="318" font-size="12" text-anchor="start" font-weight="400" fill="#424a53">Click GND, R2 + C1: splice here</text>
 <line x1="658" y1="361" x2="730" y2="361" stroke="#cf222e" stroke-width="3" stroke-linecap="round"/>
 <rect x="730" y="337" width="330" height="48" rx="6" fill="#ffebe9" stroke="#cf222e" stroke-width="1.5"/>
 <text x="742" y="357" font-size="14" text-anchor="start" font-weight="600" fill="#cf222e">NFC 4 Click: 3V3</text>
