@@ -247,8 +247,14 @@ What it takes on the NFC 4 Click:
    power-up and again when the armed reference strays more than `RESWEEP_SHIFT_PCT`
    30 % from the one right after the last sweep (surroundings changed), at most every
    10 min (`RESWEEP_MIN_INTERVAL_US`).
-8. **Settle before the reference:** the driver waits `WU_SETTLE_MS` = 1 s in wake-up
-   mode (insensitive) before calibrating — right after a poll the reading climbs for
+8. **Settle before the reference:** 4 s after a drive sweep, 3 s after a false wake,
+   1 s otherwise (`SETTLE_AFTER_SWEEP_MS` / `SETTLE_AFTER_FALSE_WAKE_MS` /
+   `SETTLE_NORMAL_MS`, set per arm with `setWakeUpSettleMs`): the driver warms during the
+   sweep and during each 1.5 s poll at full drive and the reading drifts for seconds as
+   it cools — on battery after power-up (10-10) 160 → 167, 7 false wakes in 29 s, and
+   taps in that window failed because the doorbell cannot answer the base while it
+   settles. With the longer settles: 0 false wakes in 90 s after power-up. The driver
+   waits in wake-up mode (insensitive) before calibrating — right after a poll the reading climbs for
    ~0.6 s (next to a laptop: ref 41 → 50–52, a false wake every 2 s; with the settle,
    1 in 100 s). Wake-up events raised during the settle are cleared; zero readings are
    ignored.

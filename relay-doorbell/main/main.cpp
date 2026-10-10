@@ -246,6 +246,14 @@ constexpr uint8_t LPCD_DELTA_FLOOR = 2;
 // right after the last sweep (surroundings changed: mounted, metal, laptop), at
 // most every RESWEEP_MIN_INTERVAL_US.
 constexpr unsigned RESWEEP_SHIFT_PCT = 30;
+// How long the antenna settles in wake-up mode before the reference is taken.
+// The driver warms during the drive sweep and during each 1.5 s poll at full
+// drive, and the reading drifts for seconds as it cools: on battery after
+// power-up (10-10) it rose 160 -> 167 and woke the doorbell 7 times in 29 s,
+// each wake's poll re-warming it, until the adaptive threshold reached 6.
+constexpr uint32_t SETTLE_AFTER_SWEEP_MS = 4000;
+constexpr uint32_t SETTLE_AFTER_FALSE_WAKE_MS = 3000;
+constexpr uint32_t SETTLE_NORMAL_MS = 1000;
 constexpr int64_t RESWEEP_MIN_INTERVAL_US = 10LL * 60 * 1000000;
 constexpr int FALSE_WAKES_TO_RAISE = 3;
 constexpr int64_t FALSE_WAKE_WINDOW_US = 60000000;
@@ -276,6 +284,7 @@ int64_t g_lpcdLastWarnUs = 0;
 // the strongest drive whose at-rest reading stays clear of the A/D ceiling.
 uint8_t g_lpcdDres = 0;
 bool g_lpcdSwept = false;  // the sweep has run (this boot, or before the sleep)
+bool g_lpcdAfterFalseWake = false;  // the next arm follows a false wake-up (longer settle)
 // At most 160. With a ferrite sheet behind the antenna the production Click
 // reads 187 at full drive, under the old 200 limit, and full drive false-woke
 // every 1-2 s: each re-arm right after a burst of polling took a reference
@@ -719,6 +728,9 @@ void lpcdArm() {
   if (!basis) basis = g_rtc.sweepRef;
   if (!basis) basis = 150;
   g_rtc.lpcdDelta = lpcdDeltaFor(basis, g_rtc.lpcdLevel);
+  g_st->setWakeUpSettleMs(justSwept ? SETTLE_AFTER_SWEEP_MS
+                                    : g_lpcdAfterFalseWake ? SETTLE_AFTER_FALSE_WAKE_MS : SETTLE_NORMAL_MS);
+  g_lpcdAfterFalseWake = false;
   if (!g_st->startWakeUpMode(LPCD_PERIOD_MS, g_rtc.lpcdDelta, LPCD_PHASE_DELTA, g_lpcdDres)) {
     ESP_LOGE(TAG, "could not enter wake-up mode; polling instead, retry in 5 s");
     g_lpcdActiveUntilUs = now + 5000000;
@@ -785,6 +797,7 @@ bool lpcdGate() {
     if (g_lpcdWakePending) {
       ++g_lpcdFalseWakes;
       ++g_rtc.falseWakes;
+      g_lpcdAfterFalseWake = true;
       g_rtc.falseLog[g_rtc.falseLogN % 4][0] = g_lastWakeAmp;
       g_rtc.falseLog[g_rtc.falseLogN % 4][1] = g_lastWakeRef;
       ++g_rtc.falseLogN;
